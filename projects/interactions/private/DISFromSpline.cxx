@@ -10,7 +10,7 @@
 #include <vector>                                          // for vector
 #include <assert.h>                                        // for assert
 #include <stddef.h>                                        // for size_t
-
+#include <boost/math/special_functions/gamma.hpp>          // for gamma_p_inv
 #include <rk/rk.hh>                                        // for P4, Boost
 #include <rk/geom3.hh>                                     // for Vector3
 
@@ -382,7 +382,36 @@ double DISFromSpline::InteractionThreshold(dataclasses::InteractionRecord const 
     return 0;
 }
 
-void DISFromSpline::SampleFinalState(dataclasses::CrossSectionDistributionRecord & record, std::shared_ptr<siren::utilities::SIREN_random> random) const {
+std::vector<double> DISFromSpline::ComputeSubshowerPositions(double E_had, double E_sub) {
+    int N = std::max(1, (int)std::round(E_had / E_sub));        // Number of sub-showers
+
+    // Analytical approximation for hadronic shower gamma parameters in ice.
+    // alpha ~ 0.3 + 0.7*ln(E/E_c), beta ~ 0.9 (roughly constant).
+    // E_c = 0.2 GeV is the hadronic critical energy in ice.
+    // These will be replaced by B-spline lookup later.
+    double E_c  = 0.2;
+    double alpha = 0.3 + 0.7 * std::log(E_had / E_c);
+    double beta  = 0.9;
+
+    // Radiation length in ice: X0 = 36.08 g/cm^2 / rho
+    const double rho_ice = 0.9216; // g/cm^3
+    const double X0_cm   = 36.08 / rho_ice; // ~39.1 cm
+
+    // Place sub-showers at midpoint quantiles of the gamma distribution.
+    // r_i = (2i-1)/(2N) divides [0,1] into N equal-probability bins.
+    // X_i = gamma_quantile(r_i; alpha, beta) is the position in radiation lengths,
+    // converted to cm by multiplying by X0_cm.
+    std::vector<double> positions(N);
+    for(int i = 0; i < N; i++) {
+        double r_i = (2.0 * (i + 1) - 1.0) / (2.0 * N);
+        double x_rad = boost::math::gamma_p_inv(alpha, r_i) / beta;
+        positions[i] = x_rad * X0_cm;
+    }
+
+    return positions; // positions in cm along shower axis from interaction vertex
+}
+
+void DISFromSpline::FinalState(dataclasses::CrossSectionDistributionRecord & record, std::shared_ptr<siren::utilities::SIREN_random> random) const {
     // Uses Metropolis-Hastings Algorithm!
     // useful for cases where we don't know the supremum of our distribution, and the distribution is multi-dimensional
     if (differential_cross_section_.get_ndim() != 3) {
@@ -579,6 +608,20 @@ void DISFromSpline::SampleFinalState(dataclasses::CrossSectionDistributionRecord
     other.SetFourMomentum({p4.e(), p4.px(), p4.py(), p4.pz()});
     other.SetMass(p4.m());
     other.SetHelicity(record.target_helicity);
+
+    // Compute sub-shower positions along the hadronic shower axis.
+    // E_sub = 1 GeV is hardcoded; alpha/beta come from analytical formula for now.
+    double E_had = E1_lab * final_y;
+    double E_sub = 1.0; // GeV
+    std::vector<double> subshower_positions = ComputeSubshowerPositions(E_had, E_sub);
+    int N_sub = subshower_positions.size();
+
+    // Store the shower parameters needed to reconstruct positions downstream.
+    // Positions are deterministic given these four numbers + the hadronic direction.
+    record.interaction_parameters["subshower_N"]     = static_cast<double>(N_sub);
+    record.interaction_parameters["subshower_E_sub"] = E_had / N_sub;
+    record.interaction_parameters["subshower_alpha"] = 0.3 + 0.7 * std::log(E_had / 0.2);
+    record.interaction_parameters["subshower_beta"]  = 0.9;
 }
 
 double DISFromSpline::FinalStateProbability(dataclasses::InteractionRecord const & interaction) const {

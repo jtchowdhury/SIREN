@@ -89,6 +89,7 @@ public:
     int GetInteractionType() const {return interaction_type_;};
 
     static double GetLeptonMass(siren::dataclasses::ParticleType lepton_type);
+    static std::vector<double> ComputeSubshowerPositions(double E_had, double E_sub);
 
 public:
     virtual std::vector<std::string> DensityVariables() const override;
