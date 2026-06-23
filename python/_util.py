@@ -962,6 +962,10 @@ def SaveEvents(events,
         "primary_momentum":[], # primary momentum of each interaction
         "secondary_momenta":[], # secondary momentum of each interaction
         "parent_idx":[], # index of the parent interaction
+        "subshower_N":[],     # number of sub-showers per interaction
+        "subshower_E_sub":[], # energy per sub-shower [GeV]
+        "subshower_alpha":[], # gamma distribution shape parameter
+        "subshower_beta":[],  # gamma distribution rate parameter
     }
     for ie, event in enumerate(events):
         print("Saving Event %d/%d  " % (ie, len(events)), end="\r")
@@ -978,7 +982,11 @@ def SaveEvents(events,
                   "secondary_types",
                   "primary_momentum",
                   "secondary_momenta",
-                  "parent_idx"]:
+                  "parent_idx",
+                  "subshower_N",
+                  "subshower_E_sub",
+                  "subshower_alpha",
+                  "subshower_beta"]:
             datasets[k].append([])
         # loop over interactions
         for id, datum in enumerate(event.tree):
@@ -1017,6 +1025,14 @@ def SaveEvents(events,
                 datasets["secondary_types"][-1][-1].append(int(sec_type))
                 datasets["secondary_momenta"][-1][-1].append(np.array(sec_momenta,dtype=float))
             datasets["num_secondaries"][-1].append(isec+1)
+
+            # subshower parameters set by DISFromSpline::SampleFinalState in C++
+            iparams = datum.record.interaction_parameters
+            datasets["subshower_N"][-1].append(iparams.get("subshower_N", float("nan")))
+            datasets["subshower_E_sub"][-1].append(iparams.get("subshower_E_sub", float("nan")))
+            datasets["subshower_alpha"][-1].append(iparams.get("subshower_alpha", float("nan")))
+            datasets["subshower_beta"][-1].append(iparams.get("subshower_beta", float("nan")))
+
         datasets["num_interactions"].append(id+1)
 
     # save events
@@ -1026,6 +1042,15 @@ def SaveEvents(events,
         group = fout.create_group("Events")
         form, length, container = ak.to_buffers(ak.to_packed(ak_array), container=group)
         group.attrs["form"] = form.to_json()
+        group.attrs["length"] = length
+        fout.close()
+    if save_parquet:
+        ak.to_parquet(ak_array,output_filename+".parquet")
+
+# Load events from the custom SIREN event format
+def LoadEvents(filename):
+    return _dataclasses.LoadInteractionTrees(filename)
+p.attrs["form"] = form.to_json()
         group.attrs["length"] = length
         fout.close()
     if save_parquet:
