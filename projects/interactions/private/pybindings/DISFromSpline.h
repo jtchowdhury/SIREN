@@ -82,8 +82,6 @@ void register_DISFromSpline(pybind11::module_ & m) {
         .def("GetPossiblePrimaries",&DISFromSpline::GetPossiblePrimaries)
         .def("GetPossibleSignatures",&DISFromSpline::GetPossibleSignatures)
         .def("GetPossibleSignaturesFromParents",&DISFromSpline::GetPossibleSignaturesFromParents)
-        .def("FinalStateProbability",&DISFromSpline::FinalStateProbability)
-        .def_static("ComputeSubshowerPositions",&DISFromSpline::ComputeSubshowerPositions,
-            arg("E_had"), arg("E_sub"));
+        .def("FinalStateProbability",&DISFromSpline::FinalStateProbability);
 }
 

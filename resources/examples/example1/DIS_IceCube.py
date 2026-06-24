@@ -3,7 +3,7 @@ import siren
 from siren._util import GenerateEvents,SaveEvents
 
 # Number of events to inject
-events_to_inject = int(1e5)
+events_to_inject = int(1e3)
 
 # Experiment to run
 experiment = "IceCube"

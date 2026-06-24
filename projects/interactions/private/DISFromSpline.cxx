@@ -411,7 +411,7 @@ std::vector<double> DISFromSpline::ComputeSubshowerPositions(double E_had, doubl
     return positions; // positions in cm along shower axis from interaction vertex
 }
 
-void DISFromSpline::FinalState(dataclasses::CrossSectionDistributionRecord & record, std::shared_ptr<siren::utilities::SIREN_random> random) const {
+void DISFromSpline::SampleFinalState(dataclasses::CrossSectionDistributionRecord & record, std::shared_ptr<siren::utilities::SIREN_random> random) const {
     // Uses Metropolis-Hastings Algorithm!
     // useful for cases where we don't know the supremum of our distribution, and the distribution is multi-dimensional
     if (differential_cross_section_.get_ndim() != 3) {
