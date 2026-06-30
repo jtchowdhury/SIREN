@@ -12,11 +12,7 @@ Produces three figures:
                          Cherenkov yield.Requires the Pythia DIS file 
                          (for sub-cascade species and energies); 
                          uses G4 N_total via log-linear interpolation.
-                         NOTE: the E_nu = 100 TeV Pythia group is intentionally
-                         left blank — the highest G4 point is 30 TeV, so
-                         extrapolation to 100 TeV sub-cascades is unreliable.
-                         Re-run after generating 100 TeV G4 samples.
-
+                         
   3. Yield curves      — mean total Cherenkov photon count (N_total) vs energy
                          per species (log-log). The G4 counterpart to the Pythia
                          multiplicity plot — shows which species contributes most.
@@ -59,17 +55,19 @@ SPECIES = [
     (-211,  "pim",  "π⁻",   "tomato"),
     (321,   "Kp",   "K⁺",   "green"),
     (-321,  "Km",   "K⁻",   "purple"),
+    (310,   "KS",   "K_S",  "olive"),
+    (130,   "KL",   "K_L",  "teal"),
+    (2212,  "p",    "p",    "sienna"),
+    (2112,  "n",    "n",    "navy"),
 ]
 PID_TO_META = {pid: (name, label, color) for pid, name, label, color in SPECIES}
 
 # PDG IDs present in Pythia top20 but not in our G4 library → proxy mapping
+# KS(310), KL(130), p(2212), n(2112) all have real G4 data up to 30 TeV.
+# Only antiparticles lack data (rare in ν CC DIS final states).
 PID_PROXY = {
-    310:  321,   # K_S  → K⁺  (similar hadronic shower)
-    130:  321,   # K_L  → K⁺
-    2212: 211,   # p    → π⁺  (rough; hadronic shower, similar visible fraction)
-    2112: 211,   # n    → π⁺  (rough; neutron has less direct Cherenkov)
-    -2212: 211,
-    -2112: 211,
+    -2212: 2212,  # p̄  → p   (same shower physics)
+    -2112: 2112,  # n̄  → n
 }
 
 
@@ -124,8 +122,8 @@ def load_g4_library():
 def build_interpolators(library):
     """
     For each pid, build a log-log interpolator: E_GeV → mean N_total.
-    Only interpolates within the simulated energy range (no extrapolation).
-    Returns dict: {pid: {"interp": callable, "E_min": float, "E_max": float}}
+    Extrapolates in both directions using the log-log slope at the boundaries.
+    Returns dict: {pid: callable(E_GeV) -> mean_N_total}
     """
     interpolators = {}
     for pid, e_data in library.items():
@@ -134,12 +132,8 @@ def build_interpolators(library):
         log_e    = np.log10(energies)
         log_n    = np.log10(means)
         interp   = interp1d(log_e, log_n, kind="linear",
-                            fill_value=np.nan, bounds_error=False)
-        interpolators[pid] = {
-            "interp": interp,
-            "E_min":  energies[0],
-            "E_max":  energies[-1],
-        }
+                            fill_value="extrapolate", bounds_error=False)
+        interpolators[pid] = interp
     return interpolators
 
 
@@ -149,22 +143,27 @@ def build_interpolators(library):
 
 def plot_profile_library(library):
     """
-    One panel per species. Each panel overlays mean ± 1σ profiles at all
-    simulated energies, color-coded by energy (log scale).
+    3×3 grid of panels (one per species). Each panel overlays mean ± 1σ
+    longitudinal Cherenkov profiles at all simulated energies, color-coded
+    by energy (log scale). Y-axis is log-scale, independent per species.
     """
-    n_species = len(SPECIES)
-    fig, axes = plt.subplots(1, n_species, figsize=(5 * n_species, 4), sharey=False)
+    n_cols, n_rows = 3, 3
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 12), sharey=False)
+    axes_flat = axes.flatten()
+    cmap = cm.plasma
 
-    for ax, (pid, name, label, base_color) in zip(axes, SPECIES):
+    for idx, (pid, name, label, base_color) in enumerate(SPECIES):
+        ax = axes_flat[idx]
+
         if pid not in library:
             ax.set_title(f"{label}  (no data)")
+            ax.set_visible(True)
             continue
 
         e_data    = library[pid]
         energies  = sorted(e_data.keys())
         log_e_min = np.log10(energies[0])
         log_e_max = np.log10(energies[-1])
-        cmap      = cm.plasma
 
         for E in energies:
             profiles  = e_data[E]["profiles"]
@@ -179,16 +178,22 @@ def plot_profile_library(library):
 
             e_label = (f"{E/1000:.0f} TeV" if E >= 1000 else f"{E:.0f} GeV")
             ax.plot(z_centers, mean_p, color=color, linewidth=1.2, label=e_label)
-            ax.fill_between(z_centers, mean_p - std_p, mean_p + std_p,
-                            alpha=0.15, color=color)
+            # σ band: clip to positive values for log scale
+            lo = np.maximum(mean_p - std_p, 1e-1)
+            ax.fill_between(z_centers, lo, mean_p + std_p, alpha=0.15, color=color)
 
-        ax.set_xlabel("Depth in ice [cm]")
-        ax.set_ylabel("Cherenkov photons / 5 cm")
-        ax.set_title(f"{label}")
-        ax.legend(fontsize=7, ncol=2)
+        ax.set_yscale("log")
+        ax.set_xlabel("Depth in ice [cm]", fontsize=8)
+        ax.set_ylabel("Cherenkov photons / 5 cm", fontsize=8)
+        ax.set_title(f"{label}", fontsize=10)
+        ax.legend(fontsize=6, ncol=2)
         ax.set_xlim(0, None)
 
-    fig.suptitle("Geant4 Cherenkov longitudinal profiles  (mean ± 1σ)", fontsize=12)
+    # Hide any unused panels (none with 9 species and 3×3, but just in case)
+    for idx in range(len(SPECIES), n_rows * n_cols):
+        axes_flat[idx].set_visible(False)
+
+    fig.suptitle("Geant4 Cherenkov longitudinal profiles  (mean ± 1σ)", fontsize=13)
     fig.tight_layout()
     path = os.path.join(OUT_DIR, "g4_profile_library.png")
     fig.savefig(path, dpi=150)
@@ -202,21 +207,18 @@ def plot_profile_library(library):
 
 def lookup_yield(pid, E_GeV, interpolators):
     """
-    Return interpolated mean N_total for (pid, E_GeV).
-    Returns np.nan if E is outside the simulated range (no extrapolation).
+    Return interpolated (or extrapolated) mean N_total for (pid, E_GeV).
     Returns 0 for padding entries (pid==0 or E<=0).
     Falls back to proxy pid if species not in library.
+    Extrapolates in both directions using the log-log boundary slope.
     """
     if pid == 0 or E_GeV <= 0:
         return 0.0
     resolved = PID_PROXY.get(pid, pid)
     if resolved not in interpolators:
         return 0.0
-    meta  = interpolators[resolved]
-    if E_GeV > meta["E_max"] or E_GeV < meta["E_min"]:
-        return np.nan   # outside simulated range — caller handles this
-    val = meta["interp"](np.log10(E_GeV))
-    return float(10 ** val) if not np.isnan(val) else np.nan
+    val = interpolators[resolved](np.log10(E_GeV))
+    return float(10 ** val)
 
 
 def plot_cumulative_k_g4(interpolators):
@@ -249,15 +251,6 @@ def plot_cumulative_k_g4(interpolators):
             ax.set_ylim(0, 1.05)
             ax.set_xlabel("# sub-cascades tracked (top k by energy)")
 
-            # Leave this panel blank — G4 coverage doesn't reach 100 TeV
-            if grp_name in SKIP_PYTHIA_GROUPS:
-                ax.text(0.5, 0.5,
-                        "G4 data not yet available\n(max coverage: 30 TeV)",
-                        transform=ax.transAxes, ha="center", va="center",
-                        fontsize=9, color="gray",
-                        bbox=dict(boxstyle="round", fc="white", ec="gray", alpha=0.7))
-                continue
-
             grp        = pf[grp_name]
             top20_e    = grp["top20_energies"][:]   # (nevents, 20)
             top20_pids = grp["top20_pids"][:]       # (nevents, 20)
@@ -271,17 +264,6 @@ def plot_cumulative_k_g4(interpolators):
                 for i in range(n_events)
             ], dtype=float)
 
-            valid = ~np.any(np.isnan(g4_yields), axis=1)
-            n_valid = valid.sum()
-            if n_valid == 0:
-                ax.text(0.5, 0.5, "No valid events", transform=ax.transAxes,
-                        ha="center", va="center", color="gray")
-                continue
-            if n_valid < n_events:
-                print(f"  {grp_name}: dropped {n_events - n_valid} events with "
-                      f"sub-cascade E outside G4 range")
-
-            g4_yields = g4_yields[valid]
             total     = g4_yields.sum(axis=1, keepdims=True)
             total     = np.where(total == 0, 1.0, total)
             cumfrac   = np.cumsum(g4_yields, axis=1) / total
@@ -299,10 +281,10 @@ def plot_cumulative_k_g4(interpolators):
                        label=f"90% (k={k90})")
             ax.axvline(k90, color="r", linestyle=":", linewidth=0.7, alpha=0.7)
             ax.legend(fontsize=8)
-            if n_valid < n_events:
-                ax.text(0.98, 0.02, f"n={n_valid}/{n_events}",
+            if grp_name in SKIP_PYTHIA_GROUPS:
+                ax.text(0.98, 0.02, "(extrapolated beyond 30 TeV)",
                         transform=ax.transAxes, ha="right", va="bottom",
-                        fontsize=7, color="gray")
+                        fontsize=7, color="gray", style="italic")
 
         axes[0].set_ylabel("Cumulative Cherenkov fraction")
         fig.suptitle(
@@ -352,14 +334,14 @@ def plot_yield_curves(library):
 
     ax1.set_xscale("log")
     ax1.set_yscale("log")
-    ax1.set_xlabel("Kinetic energy [GeV]")
+    ax1.set_xlabel("Particle energy (kinetic ≈ total) [GeV]")
     ax1.set_ylabel("Mean N_total  (Cherenkov photons, 300–600 nm)")
     ax1.set_title("Cherenkov yield per particle")
     ax1.legend(fontsize=9)
     ax1.grid(True, which="both", alpha=0.3)
 
     ax2.set_xscale("log")
-    ax2.set_xlabel("Kinetic energy [GeV]")
+    ax2.set_xlabel("Particle energy (kinetic ≈ total) [GeV]")
     ax2.set_ylabel("σ / μ  (N_total)")
     ax2.set_title("Shower-to-shower fluctuations")
     ax2.legend(fontsize=9)
