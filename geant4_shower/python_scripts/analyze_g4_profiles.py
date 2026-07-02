@@ -70,6 +70,20 @@ PID_PROXY = {
     -2112: 2112,  # n̄  → n
 }
 
+# ── Plot flags — set False to skip ────────────────────────────────────────────
+PLOT_PROFILE_LIBRARY  = True   # Plot 1: longitudinal profile per species
+PLOT_CUMULATIVE_K     = True   # Plot 2: sub-cascades needed for 90% Cherenkov yield
+PLOT_YIELD_CURVES     = True   # Plot 3: N_total vs energy per species
+PLOT_COMPOSITE_SHOWER = True   # Plot 4: composite hadronic shower profile (Pythia DIS)
+
+
+def nice_label(grp_name):
+    """'E_nu_1e+03' → '1 TeV' etc."""
+    e = float(grp_name.replace("E_nu_", ""))
+    if e >= 1e6: return f"{e/1e6:.0f} PeV"
+    if e >= 1e3: return f"{e/1e3:.0f} TeV"
+    return f"{e:.0f} GeV"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data loading
@@ -183,6 +197,7 @@ def plot_profile_library(library):
             ax.fill_between(z_centers, lo, mean_p + std_p, alpha=0.15, color=color)
 
         ax.set_yscale("log")
+        ax.set_ylim(0.5, None)
         ax.set_xlabel("Depth in ice [cm]", fontsize=8)
         ax.set_ylabel("Cherenkov photons / 5 cm", fontsize=8)
         ax.set_title(f"{label}", fontsize=10)
@@ -231,12 +246,6 @@ def plot_cumulative_k_g4(interpolators):
         print(f"Skipping cumulative-k plot: {PYTHIA_FILE} not found.")
         return
 
-    def nice_label(grp_name):
-        e = float(grp_name.replace("E_nu_", ""))
-        if e >= 1e6: return f"{e/1e6:.0f} PeV"
-        if e >= 1e3: return f"{e/1e3:.0f} TeV"
-        return f"{e:.0f} GeV"
-
     with h5py.File(PYTHIA_FILE, "r") as pf:
         groups = sorted(pf.keys())
 
@@ -281,10 +290,6 @@ def plot_cumulative_k_g4(interpolators):
                        label=f"90% (k={k90})")
             ax.axvline(k90, color="r", linestyle=":", linewidth=0.7, alpha=0.7)
             ax.legend(fontsize=8)
-            if grp_name in SKIP_PYTHIA_GROUPS:
-                ax.text(0.98, 0.02, "(extrapolated beyond 30 TeV)",
-                        transform=ax.transAxes, ha="right", va="bottom",
-                        fontsize=7, color="gray", style="italic")
 
         axes[0].set_ylabel("Cumulative Cherenkov fraction")
         fig.suptitle(
@@ -358,6 +363,93 @@ def plot_yield_curves(library):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Plot 4: Composite hadronic shower profile
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_composite_shower(library):
+    """
+    For each Pythia DIS event, sum the mean G4 Cherenkov profiles of all
+    stored secondaries (top20 by energy, non-zero entries only).
+    Each secondary's profile is looked up at the nearest G4 grid energy in
+    log-E space for its species.  Averaging over events gives the mean ± 1σ
+    composite hadronic shower profile — what the detector actually sees from
+    a full DIS hadronic blob.
+
+    One panel per E_nu group in the Pythia file.
+    """
+    if not os.path.exists(PYTHIA_FILE):
+        print(f"Skipping composite shower plot: {PYTHIA_FILE} not found.")
+        return
+
+    # Build lookup: (pid, E_GeV) → mean profile at nearest grid energy
+    def nearest_mean_profile(pid, E_GeV):
+        resolved = PID_PROXY.get(pid, pid)
+        if resolved not in library or E_GeV <= 0:
+            return None
+        energies = sorted(library[resolved].keys())
+        log_E    = np.log10(E_GeV)
+        nearest  = min(energies, key=lambda e: abs(np.log10(e) - log_E))
+        return library[resolved][nearest]["profiles"].mean(axis=0)
+
+    # Reference z-axis from first available library entry
+    ref_pid  = next(iter(library))
+    ref_E    = sorted(library[ref_pid].keys())[0]
+    z_edges  = library[ref_pid][ref_E]["z_edges"]
+    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+    n_bins   = len(z_centers)
+
+    with h5py.File(PYTHIA_FILE, "r") as pf:
+        groups = sorted(pf.keys())
+        n_groups = len(groups)
+        fig, axes = plt.subplots(1, n_groups, figsize=(5 * n_groups, 4), sharey=False)
+        if n_groups == 1:
+            axes = [axes]
+
+        for ax, grp_name in zip(axes, groups):
+            grp        = pf[grp_name]
+            top20_e    = grp["top20_energies"][:]   # (n_events, 20) — total energy p.e()
+            top20_pids = grp["top20_pids"][:]       # (n_events, 20)
+            n_events   = top20_e.shape[0]
+
+            composite = np.zeros((n_events, n_bins))
+
+            for i in range(n_events):
+                for k in range(top20_e.shape[1]):
+                    pid = int(top20_pids[i, k])
+                    E_k = float(top20_e[i, k])
+                    if pid == 0 or E_k <= 0:
+                        continue   # padding entry
+                    prof = nearest_mean_profile(pid, E_k)
+                    if prof is None:
+                        continue   # species not in library
+                    composite[i] += prof
+
+            mean_p = composite.mean(axis=0)
+            std_p  = composite.std(axis=0)
+
+            ax.plot(z_centers, mean_p, color="steelblue", linewidth=1.5, label="mean")
+            ax.fill_between(z_centers,
+                            np.maximum(mean_p - std_p, 0),
+                            mean_p + std_p,
+                            alpha=0.3, color="steelblue", label="±1σ")
+            ax.set_title(f"E_ν = {nice_label(grp_name)}")
+            ax.set_xlabel("Depth in ice [cm]")
+            ax.set_xlim(0, None)
+            ax.legend(fontsize=8)
+
+        axes[0].set_ylabel("Cherenkov photons / 5 cm")
+        fig.suptitle(
+            "Composite hadronic shower Cherenkov profile\n"
+            "(G4 sub-shower profiles summed over Pythia DIS secondaries, mean ± 1σ)",
+            fontsize=10)
+        fig.tight_layout()
+        path = os.path.join(OUT_DIR, "g4_composite_shower_profile.png")
+        fig.savefig(path, dpi=150)
+        print(f"Saved {path}")
+        plt.close(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -365,13 +457,20 @@ if __name__ == "__main__":
     library       = load_g4_library()
     interpolators = build_interpolators(library)
 
-    print("\n── Plot 1: Profile library ──────────────────────────────")
-    plot_profile_library(library)
+    if PLOT_PROFILE_LIBRARY:
+        print("\n── Plot 1: Profile library ──────────────────────────────")
+        plot_profile_library(library)
 
-    print("\n── Plot 2: Cumulative k (G4 yields + Pythia DIS) ────────")
-    plot_cumulative_k_g4(interpolators)
+    if PLOT_CUMULATIVE_K:
+        print("\n── Plot 2: Cumulative k (G4 yields + Pythia DIS) ────────")
+        plot_cumulative_k_g4(interpolators)
 
-    print("\n── Plot 3: Yield curves per species ─────────────────────")
-    plot_yield_curves(library)
+    if PLOT_YIELD_CURVES:
+        print("\n── Plot 3: Yield curves per species ─────────────────────")
+        plot_yield_curves(library)
+
+    if PLOT_COMPOSITE_SHOWER:
+        print("\n── Plot 4: Composite hadronic shower profile ────────────")
+        plot_composite_shower(library)
 
     print("\nDone. All plots in", OUT_DIR)
