@@ -81,6 +81,10 @@ PLOT_COMPOSITE_SHOWER = False   # Plot 4: composite hadronic shower profile (Pyt
 PLOT_INDIVIDUAL_RUNS   = True  # Plot 5: 10 individual 1 TeV pi+ runs (illustrate multimodality)
 PLOT_SAMPLED_COMPOSITE = True  # Plot 6: 10 sampled composite showers (nearest-E run + rescale)
 
+# DIS proxy cut applied to Pythia events: E_had > this is necessary for W > 2 GeV.
+# Replace with a real (Q2 > 1) & (W > 2) cut once the Pythia file stores Q2/W.
+E_HAD_MIN_GEV = 2.6
+
 
 def nice_label(grp_name):
     """'E_nu_1e+03' → '1 TeV' etc."""
@@ -268,6 +272,10 @@ def plot_cumulative_k_g4(interpolators):
             grp        = pf[grp_name]
             top20_e    = grp["top20_energies"][:]   # (nevents, 20)
             top20_pids = grp["top20_pids"][:]       # (nevents, 20)
+            E_had      = grp["E_had"][:]
+            valid      = np.where(E_had > E_HAD_MIN_GEV)[0]
+            top20_e    = top20_e[valid]
+            top20_pids = top20_pids[valid]
             n_events, k_max = top20_e.shape
 
             # Look up G4 yield for each sub-cascade; drop events with any nan
@@ -414,7 +422,11 @@ def plot_composite_shower(library):
             grp        = pf[grp_name]
             top20_e    = grp["top20_energies"][:]   # (n_events, 20) — total energy p.e()
             top20_pids = grp["top20_pids"][:]       # (n_events, 20)
-            n_events   = top20_e.shape[0]
+            E_had      = grp["E_had"][:]
+            valid      = np.where(E_had > E_HAD_MIN_GEV)[0]
+            top20_e    = top20_e[valid]
+            top20_pids = top20_pids[valid]
+            n_events   = len(valid)
 
             composite = np.zeros((n_events, n_bins))
 
@@ -556,7 +568,7 @@ def _count_significant_peaks(prof, rel_prom=0.12, min_dist_bins=12, smooth=5):
 
 
 def plot_individual_runs(library, pid=211, E_GeV=1000.0, n_show=10,
-                         min_multimodal=3, seed=1):
+                         min_multimodal=3, seed=10):
     """
     10 individual G4 runs of a single (species, energy), overlaid on one axis,
     to show run-to-run fluctuation and multimodality. Selection: 10 random runs;
@@ -592,7 +604,7 @@ def plot_individual_runs(library, pid=211, E_GeV=1000.0, n_show=10,
     cmap = cm.viridis
     for j, idx in enumerate(selected):
         tag = " *" if is_multi[idx] else ""
-        ax.plot(z_centers, profiles[idx], lw=1.3,
+        ax.plot(z_centers, profiles[idx], lw=0.8,
                 color=cmap(j / max(len(selected) - 1, 1)),
                 label=f"run {idx}{tag}")
 
@@ -602,7 +614,7 @@ def plot_individual_runs(library, pid=211, E_GeV=1000.0, n_show=10,
     ax.set_ylabel("Cherenkov photons / 5 cm")
     ax.set_title(f"Individual G4 runs — {label} at {e_lbl}   "
                  f"({n_multi}/{len(selected)} multimodal, marked *)")
-    ax.set_xlim(0, None)
+    ax.set_xlim(0, 2000)
     ax.set_ylim(0, None)
     ax.legend(fontsize=7, ncol=2)
     fig.tight_layout()
@@ -641,9 +653,13 @@ def plot_sampled_composite(library, interpolators, e_nu_group="E_nu_1e+04",
         grp     = pf[e_nu_group]
         top_e   = grp["top20_energies"][:]   # (N, 20)
         top_pid = grp["top20_pids"][:]        # (N, 20)
+        E_had   = grp["E_had"][:]             # (N,)
 
-    n_total = top_e.shape[0]
-    ev_idx  = rng.choice(n_total, size=min(n_events_show, n_total), replace=False)
+    valid = np.where(E_had > E_HAD_MIN_GEV)[0]
+    if len(valid) == 0:
+        print("  [skip] no DIS-valid events after E_had cut.")
+        return
+    ev_idx = rng.choice(valid, size=min(n_events_show, len(valid)), replace=False)
 
     fig, ax = plt.subplots(figsize=(9, 6))
     cmap = cm.plasma
@@ -679,10 +695,8 @@ def plot_sampled_composite(library, interpolators, e_nu_group="E_nu_1e+04",
 
     ax.set_xlabel("Depth in ice [cm]")
     ax.set_ylabel("Cherenkov photons / 5 cm")
-    ax.set_title("Sampled composite hadronic showers — E_ν = 10 TeV\n"
-                 f"(top {n_track} secondaries: nearest-E run + rescale; "
-                 "remainder = one pi0 at origin)")
-    ax.set_xlim(0, None)
+    ax.set_title("Sampled composite hadronic showers — E_ν = 10 TeV")
+    ax.set_xlim(0, 2000)
     ax.set_ylim(0, None)
     ax.legend(fontsize=7, ncol=2)
     fig.tight_layout()
