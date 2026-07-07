@@ -7,15 +7,17 @@ Produces three figures:
 
   1. Profile library   — mean ± 1σ longitudinal Cherenkov profile for each
                          species at all simulated energies (one panel per species).
-
   2. Cumulative k plot — how many sub-cascades are needed to capture 90% of
                          Cherenkov yield.Requires the Pythia DIS file 
                          (for sub-cascade species and energies); 
-                         uses G4 N_total via log-linear interpolation.
-                         
+                         uses G4 N_total via log-linear interpolation.                         
   3. Yield curves      — mean total Cherenkov photon count (N_total) vs energy
                          per species (log-log). The G4 counterpart to the Pythia
                          multiplicity plot — shows which species contributes most.
+  4. Individual runs   — 10 individual G4 runs of a single (species, energy),
+                         overlaid on one axis, to show run-to-run fluctuation
+                         and multimodality.
+  5. Composite shower  — for each Pythia DIS event, sum the mean G4 Cherenkov
 
 Run from geant4_shower/python_scripts/ (or anywhere — paths are absolute):
     python analyze_g4_profiles.py
@@ -34,6 +36,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import h5py
 from scipy.interpolate import interp1d
+from scipy.signal import find_peaks
 
 # ── Paths (resolved relative to this script's location) ───────────────────────
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -71,10 +74,12 @@ PID_PROXY = {
 }
 
 # ── Plot flags — set False to skip ────────────────────────────────────────────
-PLOT_PROFILE_LIBRARY  = True   # Plot 1: longitudinal profile per species
-PLOT_CUMULATIVE_K     = True   # Plot 2: sub-cascades needed for 90% Cherenkov yield
-PLOT_YIELD_CURVES     = True   # Plot 3: N_total vs energy per species
-PLOT_COMPOSITE_SHOWER = True   # Plot 4: composite hadronic shower profile (Pythia DIS)
+PLOT_PROFILE_LIBRARY  = False   # Plot 1: longitudinal profile per species
+PLOT_CUMULATIVE_K     = False   # Plot 2: sub-cascades needed for 90% Cherenkov yield
+PLOT_YIELD_CURVES     = False   # Plot 3: N_total vs energy per species
+PLOT_COMPOSITE_SHOWER = False   # Plot 4: composite hadronic shower profile (Pythia DIS)
+PLOT_INDIVIDUAL_RUNS   = True  # Plot 5: 10 individual 1 TeV pi+ runs (illustrate multimodality)
+PLOT_SAMPLED_COMPOSITE = True  # Plot 6: 10 sampled composite showers (nearest-E run + rescale)
 
 
 def nice_label(grp_name):
@@ -450,6 +455,244 @@ def plot_composite_shower(library):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Shared helpers: sampling & rescaling individual runs
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Radiation length in ice (matches DISFromSpline): X0 = 36.08 g/cm^2 / rho_ice
+RHO_ICE = 0.9216
+X0_CM   = 36.08 / RHO_ICE   # ~39.1 cm
+
+
+def _z_centers(library):
+    """Reference longitudinal bin centers (assumed common to all runs)."""
+    ref_pid = next(iter(library))
+    ref_E   = sorted(library[ref_pid].keys())[0]
+    z_edges = library[ref_pid][ref_E]["z_edges"]
+    return 0.5 * (z_edges[:-1] + z_edges[1:])
+
+
+def _shift_profile(prof, z_centers, dz):
+    """Shift a profile by dz cm along the axis (positive = deeper), zero-filled."""
+    if abs(dz) < 1e-9:
+        return prof
+    return np.interp(z_centers - dz, z_centers, prof, left=0.0, right=0.0)
+
+
+def _nearest_grid_energy(resolved_pid, E_true, library):
+    energies = sorted(library[resolved_pid].keys())
+    return min(energies, key=lambda e: abs(np.log10(e) - np.log10(E_true)))
+
+
+def sample_rescaled_run(pid, E_true, library, interpolators, rng,
+                        z_centers, do_shift=True):
+    """
+    Pick ONE random G4 run for (species, nearest grid energy in log-E), then
+    rescale it to the true secondary energy:
+      • amplitude ×= N(E_true)/N(E_grid)          (mean-yield curve, log-log)
+      • depth shifted by ln(E_true/E_grid)·X0     (shower-max drift)
+    Keeps the individual run's shape/multimodality. Returns photons/bin array,
+    or None if the species is not in the G4 library.
+    """
+    if pid == 0 or E_true <= 0:
+        return None
+    resolved = PID_PROXY.get(pid, pid)
+    if resolved not in library or resolved not in interpolators:
+        return None
+    E_grid = _nearest_grid_energy(resolved, E_true, library)
+    profs  = library[resolved][E_grid]["profiles"]
+    prof   = profs[rng.integers(len(profs))].astype(float).copy()
+
+    interp = interpolators[resolved]
+    N_true = 10 ** interp(np.log10(E_true))
+    N_grid = 10 ** interp(np.log10(E_grid))
+    if N_grid > 0:
+        prof *= (N_true / N_grid)
+
+    if do_shift:
+        dz = np.log(E_true / E_grid) * X0_CM
+        prof = _shift_profile(prof, z_centers, dz)
+    return prof
+
+
+def make_remainder_pi0(Y_remainder, library, interpolators, rng):
+    """
+    Represent the un-tracked soft secondaries as a single pi0 at the origin
+    carrying total yield Y_remainder. Energy is chosen by inverting the pi0
+    yield curve (so the shape is physically sized), then the amplitude is
+    normalized so the integral equals Y_remainder exactly. Placed at origin
+    (no depth shift). Returns photons/bin array or None.
+    """
+    if Y_remainder <= 0 or 111 not in library or 111 not in interpolators:
+        return None
+    energies = sorted(library[111].keys())
+    logE = np.log10(energies)
+    logN = np.array([interpolators[111](le) for le in logE])
+    # invert the log-log yield curve (logN increases monotonically with logE)
+    logE_art = np.interp(np.log10(Y_remainder), logN, logE)
+    E_grid   = min(energies, key=lambda e: abs(np.log10(e) - logE_art))
+    profs    = library[111][E_grid]["profiles"]
+    prof     = profs[rng.integers(len(profs))].astype(float).copy()
+    cur = prof.sum()
+    if cur > 0:
+        prof *= (Y_remainder / cur)
+    return prof
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plot 5: individual runs of one (species, energy) — illustrate multimodality
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _count_significant_peaks(prof, rel_prom=0.12, min_dist_bins=12, smooth=5):
+    """Count prominent peaks in a (noisy) profile after light smoothing."""
+    m = prof.max()
+    if m <= 0:
+        return 0
+    if smooth > 1:
+        p = np.convolve(prof, np.ones(smooth) / smooth, mode="same")
+    else:
+        p = prof
+    peaks, _ = find_peaks(p, prominence=rel_prom * m, distance=min_dist_bins)
+    return len(peaks)
+
+
+def plot_individual_runs(library, pid=211, E_GeV=1000.0, n_show=10,
+                         min_multimodal=3, seed=1):
+    """
+    10 individual G4 runs of a single (species, energy), overlaid on one axis,
+    to show run-to-run fluctuation and multimodality. Selection: 10 random runs;
+    if fewer than `min_multimodal` are multimodal (>=2 prominent peaks), swap
+    non-multimodal picks for multimodal ones until at least `min_multimodal` are.
+    """
+    if pid not in library or E_GeV not in library[pid]:
+        print(f"  [skip] no library entry for pid={pid}, E={E_GeV} GeV")
+        return
+
+    entry     = library[pid][E_GeV]
+    profiles  = entry["profiles"].astype(float)
+    z_edges   = entry["z_edges"]
+    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+    n_events  = len(profiles)
+    rng       = np.random.default_rng(seed)
+
+    is_multi = {i: _count_significant_peaks(profiles[i]) >= 2 for i in range(n_events)}
+
+    selected = list(rng.choice(n_events, size=min(n_show, n_events), replace=False))
+    n_multi  = sum(is_multi[i] for i in selected)
+
+    if n_multi < min_multimodal:
+        pool = [i for i in range(n_events) if is_multi[i] and i not in selected]
+        rng.shuffle(pool)
+        for pos in [p for p in range(len(selected)) if not is_multi[selected[p]]]:
+            if n_multi >= min_multimodal or not pool:
+                break
+            selected[pos] = pool.pop()
+            n_multi += 1
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    cmap = cm.viridis
+    for j, idx in enumerate(selected):
+        tag = " *" if is_multi[idx] else ""
+        ax.plot(z_centers, profiles[idx], lw=1.3,
+                color=cmap(j / max(len(selected) - 1, 1)),
+                label=f"run {idx}{tag}")
+
+    label = PID_TO_META.get(pid, (None, str(pid), None))[1]
+    e_lbl = f"{E_GeV/1000:.0f} TeV" if E_GeV >= 1000 else f"{E_GeV:.0f} GeV"
+    ax.set_xlabel("Depth in ice [cm]")
+    ax.set_ylabel("Cherenkov photons / 5 cm")
+    ax.set_title(f"Individual G4 runs — {label} at {e_lbl}   "
+                 f"({n_multi}/{len(selected)} multimodal, marked *)")
+    ax.set_xlim(0, None)
+    ax.set_ylim(0, None)
+    ax.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    path = os.path.join(OUT_DIR, "g4_individual_runs_pip_1TeV.png")
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+    plt.close(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plot 6: sampled composite showers (nearest-E run + rescale, per event)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_sampled_composite(library, interpolators, e_nu_group="E_nu_1e+04",
+                           n_events_show=10, n_track=10, seed=7):
+    """
+    10 sampled composite hadronic showers at E_nu = 10 TeV, overlaid.
+    For each Pythia event: take the top `n_track` secondaries by energy, sample
+    one G4 run each at the nearest grid energy and rescale (amplitude + peak),
+    sum them, then add a single artificial pi0 at the origin carrying the total
+    yield of the remaining (un-tracked) secondaries.
+    """
+    if not os.path.exists(PYTHIA_FILE):
+        print(f"  [skip] {PYTHIA_FILE} not found.")
+        return
+
+    z_centers = _z_centers(library)
+    n_bins    = len(z_centers)
+    rng       = np.random.default_rng(seed)
+
+    with h5py.File(PYTHIA_FILE, "r") as pf:
+        if e_nu_group not in pf:
+            print(f"  [skip] group {e_nu_group} not in Pythia file "
+                  f"(have {sorted(pf.keys())}).")
+            return
+        grp     = pf[e_nu_group]
+        top_e   = grp["top20_energies"][:]   # (N, 20)
+        top_pid = grp["top20_pids"][:]        # (N, 20)
+
+    n_total = top_e.shape[0]
+    ev_idx  = rng.choice(n_total, size=min(n_events_show, n_total), replace=False)
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    cmap = cm.plasma
+    rem_fracs = []
+
+    for j, ev in enumerate(ev_idx):
+        composite = np.zeros(n_bins)
+        for k in range(min(n_track, top_e.shape[1])):
+            prof = sample_rescaled_run(int(top_pid[ev, k]), float(top_e[ev, k]),
+                                       library, interpolators, rng, z_centers,
+                                       do_shift=True)
+            if prof is not None:
+                composite += prof
+
+        Y_rem = sum(lookup_yield(int(top_pid[ev, k]), float(top_e[ev, k]),
+                                 interpolators)
+                    for k in range(n_track, top_e.shape[1]))
+        rem = make_remainder_pi0(Y_rem, library, interpolators, rng)
+        if rem is not None:
+            composite += rem
+
+        tot = composite.sum()
+        if tot > 0 and rem is not None:
+            rem_fracs.append(rem.sum() / tot)
+
+        ax.plot(z_centers, composite, lw=1.4,
+                color=cmap(0.1 + 0.8 * j / max(len(ev_idx) - 1, 1)),
+                label=f"event {ev}")
+
+    if rem_fracs:
+        print(f"  mean artificial-pi0 (remainder) fraction over shown events: "
+              f"{100*np.mean(rem_fracs):.1f}%")
+
+    ax.set_xlabel("Depth in ice [cm]")
+    ax.set_ylabel("Cherenkov photons / 5 cm")
+    ax.set_title("Sampled composite hadronic showers — E_ν = 10 TeV\n"
+                 f"(top {n_track} secondaries: nearest-E run + rescale; "
+                 "remainder = one pi0 at origin)")
+    ax.set_xlim(0, None)
+    ax.set_ylim(0, None)
+    ax.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    path = os.path.join(OUT_DIR, "g4_sampled_composite_10TeV.png")
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+    plt.close(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -472,5 +715,13 @@ if __name__ == "__main__":
     if PLOT_COMPOSITE_SHOWER:
         print("\n── Plot 4: Composite hadronic shower profile ────────────")
         plot_composite_shower(library)
+
+    if PLOT_INDIVIDUAL_RUNS:
+        print("\n── Plot 5: Individual 1 TeV pi+ runs ────────────────────")
+        plot_individual_runs(library)
+
+    if PLOT_SAMPLED_COMPOSITE:
+        print("\n── Plot 6: Sampled composite showers (nearest-E + rescale) ──")
+        plot_sampled_composite(library, interpolators)
 
     print("\nDone. All plots in", OUT_DIR)
