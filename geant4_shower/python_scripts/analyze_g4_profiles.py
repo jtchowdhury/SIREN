@@ -74,10 +74,10 @@ PID_PROXY = {
 }
 
 # ── Plot flags — set False to skip ────────────────────────────────────────────
-PLOT_PROFILE_LIBRARY  = False   # Plot 1: longitudinal profile per species
-PLOT_CUMULATIVE_K     = False   # Plot 2: sub-cascades needed for 90% Cherenkov yield
-PLOT_YIELD_CURVES     = False   # Plot 3: N_total vs energy per species
-PLOT_COMPOSITE_SHOWER = False   # Plot 4: composite hadronic shower profile (Pythia DIS)
+PLOT_PROFILE_LIBRARY  = True   # Plot 1: longitudinal profile per species
+PLOT_CUMULATIVE_K     = True   # Plot 2: sub-cascades needed for 90% Cherenkov yield
+PLOT_YIELD_CURVES     = True   # Plot 3: N_total vs energy per species
+PLOT_COMPOSITE_SHOWER = True   # Plot 4: composite hadronic shower profile (Pythia DIS)
 PLOT_INDIVIDUAL_RUNS   = True  # Plot 5: 10 individual 1 TeV pi+ runs (illustrate multimodality)
 PLOT_SAMPLED_COMPOSITE = True  # Plot 6: 10 sampled composite showers (nearest-E run + rescale)
 
