@@ -80,6 +80,7 @@ PLOT_YIELD_CURVES     = True   # Plot 3: N_total vs energy per species
 PLOT_COMPOSITE_SHOWER = True   # Plot 4: composite hadronic shower profile (Pythia DIS)
 PLOT_INDIVIDUAL_RUNS   = True  # Plot 5: 10 individual 1 TeV pi+ runs (illustrate multimodality)
 PLOT_SAMPLED_COMPOSITE = True  # Plot 6: 10 sampled composite showers (nearest-E run + rescale)
+PLOT_EVENT_SUBSHOWERS  = True  # Plot 7: per-event sub-shower breakdown + composite
 
 # DIS proxy cut applied to Pythia events: E_had > this is necessary for W > 2 GeV.
 # Replace with a real (Q2 > 1) & (W > 2) cut once the Pythia file stores Q2/W.
@@ -496,7 +497,7 @@ def _nearest_grid_energy(resolved_pid, E_true, library):
 
 
 def sample_rescaled_run(pid, E_true, library, interpolators, rng,
-                        z_centers, do_shift=True):
+                        z_centers, do_shift=True, return_meta=False):
     """
     Pick ONE random G4 run for (species, nearest grid energy in log-E), then
     rescale it to the true secondary energy:
@@ -506,13 +507,14 @@ def sample_rescaled_run(pid, E_true, library, interpolators, rng,
     or None if the species is not in the G4 library.
     """
     if pid == 0 or E_true <= 0:
-        return None
+        return (None, None) if return_meta else None
     resolved = PID_PROXY.get(pid, pid)
     if resolved not in library or resolved not in interpolators:
-        return None
-    E_grid = _nearest_grid_energy(resolved, E_true, library)
-    profs  = library[resolved][E_grid]["profiles"]
-    prof   = profs[rng.integers(len(profs))].astype(float).copy()
+        return (None, None) if return_meta else None
+    E_grid  = _nearest_grid_energy(resolved, E_true, library)
+    profs   = library[resolved][E_grid]["profiles"]
+    run_idx = int(rng.integers(len(profs)))
+    prof    = profs[run_idx].astype(float).copy()
 
     interp = interpolators[resolved]
     N_true = 10 ** interp(np.log10(E_true))
@@ -523,6 +525,8 @@ def sample_rescaled_run(pid, E_true, library, interpolators, rng,
     if do_shift:
         dz = np.log(E_true / E_grid) * X0_CM
         prof = _shift_profile(prof, z_centers, dz)
+    if return_meta:
+        return prof, {"pid": resolved, "E_grid": E_grid, "run": run_idx}
     return prof
 
 
@@ -707,6 +711,111 @@ def plot_sampled_composite(library, interpolators, e_nu_group="E_nu_1e+04",
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Plot 7: per-event sub-shower breakdown (replays a seeded composite)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_event_subshowers(library, interpolators, events=(6245, 5780),
+                          e_nu_group="E_nu_1e+04", n_events_show=10,
+                          n_track=10, seed=7):
+    """
+    Replays the seed-`seed` sampling of plot_sampled_composite (identical RNG
+    sequence, same E_had cut) and, for the requested `events`, plots every
+    sub-shower (the rescaled G4 run used for each hadron) plus the total
+    composite — one subplot per event. Because the draws are replayed in the
+    exact same order, the sub-showers are precisely those that built the
+    plot_sampled_composite figure at the same seed.
+
+    NOTE: keep n_events_show / n_track / seed equal to whatever produced the
+    figure you are dissecting, or the RNG stream (and hence the runs) will differ.
+    """
+    if not os.path.exists(PYTHIA_FILE):
+        print(f"  [skip] {PYTHIA_FILE} not found.")
+        return
+
+    z_centers = _z_centers(library)
+    n_bins    = len(z_centers)
+    rng       = np.random.default_rng(seed)
+
+    with h5py.File(PYTHIA_FILE, "r") as pf:
+        if e_nu_group not in pf:
+            print(f"  [skip] group {e_nu_group} not in Pythia file.")
+            return
+        grp     = pf[e_nu_group]
+        top_e   = grp["top20_energies"][:]
+        top_pid = grp["top20_pids"][:]
+        E_had   = grp["E_had"][:]
+
+    valid = np.where(E_had > E_HAD_MIN_GEV)[0]
+    if len(valid) == 0:
+        print("  [skip] no DIS-valid events after E_had cut.")
+        return
+    ev_idx = rng.choice(valid, size=min(n_events_show, len(valid)), replace=False)
+
+    wanted   = set(events)
+    captured = {}   # ev -> {"subs": [(label, prof)], "composite": arr}
+
+    # Replay the identical sampling loop over ALL selected events (so the RNG
+    # state matches when we reach the wanted ones); capture the breakdown.
+    for ev in ev_idx:
+        composite = np.zeros(n_bins)
+        subs = []
+        for k in range(min(n_track, top_e.shape[1])):
+            pid = int(top_pid[ev, k]); E = float(top_e[ev, k])
+            prof, meta = sample_rescaled_run(pid, E, library, interpolators, rng,
+                                             z_centers, do_shift=True,
+                                             return_meta=True)
+            if prof is not None:
+                composite += prof
+                lbl   = PID_TO_META.get(meta["pid"], (None, str(meta["pid"]), None))[1]
+                e_txt = f"{E/1000:.1f} TeV" if E >= 1000 else f"{E:.0f} GeV"
+                subs.append((f"{lbl} {e_txt}  (grid {meta['E_grid']:.0f} GeV, run {meta['run']})",
+                             prof))
+        Y_rem = sum(lookup_yield(int(top_pid[ev, k]), float(top_e[ev, k]), interpolators)
+                    for k in range(n_track, top_e.shape[1]))
+        rem = make_remainder_pi0(Y_rem, library, interpolators, rng)
+        if rem is not None:
+            composite += rem
+            subs.append(("remainder pi0 (origin)", rem))
+        if int(ev) in wanted:
+            captured[int(ev)] = {"subs": subs, "composite": composite}
+
+    missing = wanted - set(captured.keys())
+    if missing:
+        print(f"  [warn] requested events not in seed-{seed} selection: "
+              f"{sorted(missing)}  (selected: {sorted(int(e) for e in ev_idx)})")
+    show = [e for e in events if e in captured]
+    if not show:
+        print("  [skip] none of the requested events were selected at this seed.")
+        return
+
+    fig, axes = plt.subplots(len(show), 1, figsize=(11, 5.5 * len(show)))
+    if len(show) == 1:
+        axes = [axes]
+    for ax, ev in zip(axes, show):
+        data  = captured[ev]
+        subs  = data["subs"]
+        n_sub = len(subs)
+        for i, (lbl, prof) in enumerate(subs):
+            style = "--" if lbl.startswith("remainder") else "-"
+            ax.plot(z_centers, prof, style, lw=1.1,
+                    color=cm.turbo(i / max(n_sub - 1, 1)), label=lbl)
+        ax.plot(z_centers, data["composite"], color="black", lw=2.4,
+                label="composite (total)")
+        ax.set_title(f"Event {ev} — sub-shower breakdown + composite "
+                     f"(E_ν = 10 TeV, seed {seed})")
+        ax.set_xlabel("Depth in ice [cm]")
+        ax.set_ylabel("Cherenkov photons / 5 cm")
+        ax.set_xlim(0, None)
+        ax.set_ylim(0, None)
+        ax.legend(fontsize=6.5, ncol=2)
+    fig.tight_layout()
+    path = os.path.join(OUT_DIR, "g4_event_subshowers_10TeV.png")
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+    plt.close(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -737,5 +846,9 @@ if __name__ == "__main__":
     if PLOT_SAMPLED_COMPOSITE:
         print("\n── Plot 6: Sampled composite showers (nearest-E + rescale) ──")
         plot_sampled_composite(library, interpolators)
+
+    if PLOT_EVENT_SUBSHOWERS:
+        print("\n── Plot 7: Per-event sub-shower breakdown ───────────────")
+        plot_event_subshowers(library, interpolators)
 
     print("\nDone. All plots in", OUT_DIR)
