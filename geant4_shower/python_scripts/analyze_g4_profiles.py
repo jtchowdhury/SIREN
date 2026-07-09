@@ -74,12 +74,12 @@ PID_PROXY = {
 }
 
 # ── Plot flags — set False to skip ────────────────────────────────────────────
-PLOT_PROFILE_LIBRARY  = True   # Plot 1: longitudinal profile per species
-PLOT_CUMULATIVE_K     = True   # Plot 2: sub-cascades needed for 90% Cherenkov yield
-PLOT_YIELD_CURVES     = True   # Plot 3: N_total vs energy per species
-PLOT_COMPOSITE_SHOWER = True   # Plot 4: composite hadronic shower profile (Pythia DIS)
-PLOT_INDIVIDUAL_RUNS   = True  # Plot 5: 10 individual 1 TeV pi+ runs (illustrate multimodality)
-PLOT_SAMPLED_COMPOSITE = True  # Plot 6: 10 sampled composite showers (nearest-E run + rescale)
+PLOT_PROFILE_LIBRARY  = False   # Plot 1: longitudinal profile per species
+PLOT_CUMULATIVE_K     = False   # Plot 2: sub-cascades needed for 90% Cherenkov yield
+PLOT_YIELD_CURVES     = False   # Plot 3: N_total vs energy per species
+PLOT_COMPOSITE_SHOWER = False   # Plot 4: composite hadronic shower profile (Pythia DIS)
+PLOT_INDIVIDUAL_RUNS   = False  # Plot 5: 10 individual 1 TeV pi+ runs (illustrate multimodality)
+PLOT_SAMPLED_COMPOSITE = False  # Plot 6: 10 sampled composite showers (nearest-E run + rescale)
 PLOT_EVENT_SUBSHOWERS  = True  # Plot 7: per-event sub-shower breakdown + composite
 
 # DIS proxy cut applied to Pythia events: E_had > this is necessary for W > 2 GeV.
@@ -768,8 +768,8 @@ def plot_event_subshowers(library, interpolators, events=(6245, 5780),
                 composite += prof
                 lbl   = PID_TO_META.get(meta["pid"], (None, str(meta["pid"]), None))[1]
                 e_txt = f"{E/1000:.1f} TeV" if E >= 1000 else f"{E:.0f} GeV"
-                subs.append((f"{lbl} {e_txt}  (grid {meta['E_grid']:.0f} GeV, run {meta['run']})",
-                             prof))
+                #subs.append((f"{lbl} {e_txt}  (grid {meta['E_grid']:.0f} GeV, run {meta['run']})",prof))
+                subs.append((f"{lbl} {e_txt}", prof))
         Y_rem = sum(lookup_yield(int(top_pid[ev, k]), float(top_e[ev, k]), interpolators)
                     for k in range(n_track, top_e.shape[1]))
         rem = make_remainder_pi0(Y_rem, library, interpolators, rng)
