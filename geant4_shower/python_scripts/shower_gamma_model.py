@@ -48,7 +48,7 @@ from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 from scipy.interpolate import CubicSpline, interp1d
 
-_trapz = getattr(np, "trapezoid", getattr(np, "trapz"))
+_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz  # numpy 2.x renamed trapz
 
 # ---------------------------------------------------------------------------
 # species metadata (name used in filenames <-> PDG id)
@@ -228,17 +228,20 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1):
                     fits = [fit_profile(x, y, Kmax) for y in valid]
                 counts = np.zeros(Kmax, dtype=int)
                 Z = {m: [] for m in range(1, Kmax + 1)}
-                Ns = []
                 for fit in fits:
                     m = fit["m"]
                     counts[m - 1] += 1
                     Z[m].append(_to_z(fit["w"], fit["alpha"], fit["beta"]))
-                    Ns.append(fit["N"])
                 tot = counts.sum()
+                # Yield distribution taken from the G4 truth (so the sampled total
+                # light matches the real event-to-event spread), fallback = integral.
+                Ng4 = np.asarray(d.get("N_total", profs.sum(axis=1)), float)
+                logN = np.log(np.maximum(Ng4, 1e-9))
                 dists[pid][E] = dict(
                     p_m=counts / max(tot, 1),
                     Z={m: np.array(v) for m, v in Z.items() if len(v) > 0},
-                    N_mean=float(np.median(Ns)) if Ns else 0.0,   # median: robust to rare bad fits
+                    N_mean=float(np.exp(np.median(logN))),   # robust central yield
+                    N_logsigma=float(np.std(logN)),          # event-to-event yield spread
                     z_centers=x,
                 )
                 if verbose:
@@ -288,8 +291,9 @@ class ShowerParamInterpolator:
             # p(m) vs logE
             pm_curves = [_make_1d(logE, [edata[E]["p_m"][k] for E in Es])
                          for k in range(Kmax)]
-            # log N vs logE
+            # log N vs logE  (+ its spread, for yield fluctuation)
             logN = _make_1d(logE, [np.log(max(edata[E]["N_mean"], 1e-9)) for E in Es])
+            logNsig = _make_1d(logE, [edata[E].get("N_logsigma", 0.0) for E in Es])
             # per-m mean & cov of transformed vector
             m_models = {}
             for m in range(1, Kmax + 1):
@@ -313,8 +317,9 @@ class ShowerParamInterpolator:
                           for i in range(dim)]
                 m_models[m] = dict(dim=dim, mean_sp=mean_sp, cov_sp=cov_sp,
                                    logE_range=(lE.min(), lE.max()))
-            self.pid_models[pid] = dict(pm=pm_curves, logN=logN, m_models=m_models,
-                                        z_centers=zc, logE_range=(logE.min(), logE.max()))
+            self.pid_models[pid] = dict(pm=pm_curves, logN=logN, logNsig=logNsig,
+                                        m_models=m_models, z_centers=zc,
+                                        logE_range=(logE.min(), logE.max()))
 
     def p_m(self, pid, E):
         cur = self.pid_models[pid]["pm"]
@@ -324,6 +329,10 @@ class ShowerParamInterpolator:
 
     def yield_mean(self, pid, E):
         return float(np.exp(self.pid_models[pid]["logN"](np.log10(E))))
+
+    def yield_logsigma(self, pid, E):
+        sp = self.pid_models[pid].get("logNsig")
+        return float(max(sp(np.log10(E)), 0.0)) if sp is not None else 0.0
 
     def mean_cov(self, pid, E, m):
         mm = self.pid_models[pid]["m_models"].get(m)
@@ -360,17 +369,20 @@ class ShowerSampler:
         m = int(rng.choice(avail, p=p))
         mean, cov = self.interp.mean_cov(pid, E, m)
         z = rng.multivariate_normal(mean, cov)
+        sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        z = np.clip(z, mean - 2.5 * sd, mean + 2.5 * sd)   # truncate fat Gaussian tails
         w, alpha, beta = _from_z(z, m)
         return m, w, alpha, beta
 
-    def sample_profile(self, pid, E, rng, x=None, N=None, yield_sigma=0.0):
+    def sample_profile(self, pid, E, rng, x=None, N=None, yield_sigma=None):
         if x is None:
             x = self.interp.z_centers(pid)
         m, w, alpha, beta = self.sample_params(pid, E, rng)
         if N is None:
             N = self.interp.yield_mean(pid, E)
-            if yield_sigma > 0:
-                N *= np.exp(rng.normal(0, yield_sigma))
+            s = self.interp.yield_logsigma(pid, E) if yield_sigma is None else yield_sigma
+            if s > 0:
+                N *= np.exp(rng.normal(0, s))
         prof = N * np.sum([w[i] * _kernel(x, alpha[i], beta[i]) for i in range(m)], axis=0)
         return prof, dict(m=m, w=w, alpha=alpha, beta=beta, N=N)
 
