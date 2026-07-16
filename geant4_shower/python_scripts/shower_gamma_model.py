@@ -228,20 +228,24 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1):
                     fits = [fit_profile(x, y, Kmax) for y in valid]
                 counts = np.zeros(Kmax, dtype=int)
                 Z = {m: [] for m in range(1, Kmax + 1)}
+                Ns = []
                 for fit in fits:
                     m = fit["m"]
                     counts[m - 1] += 1
                     Z[m].append(_to_z(fit["w"], fit["alpha"], fit["beta"]))
+                    Ns.append(fit["N"])
                 tot = counts.sum()
-                # Yield distribution taken from the G4 truth (so the sampled total
-                # light matches the real event-to-event spread), fallback = integral.
-                Ng4 = np.asarray(d.get("N_total", profs.sum(axis=1)), float)
-                logN = np.log(np.maximum(Ng4, 1e-9))
+                # Yield stats come from the FITTED amplitudes (sum of A_i). These are
+                # the units the sampler rebuilds in (N * unit-area kernels -> a bin sum
+                # of N/binwidth), so N_mean must be in these units, NOT raw G4 N_total.
+                # The log-spread still equals the G4 N_total spread (the bin-width
+                # factor is constant and cancels), so the fluctuation is faithful.
+                logN = np.log(np.maximum(Ns, 1e-9)) if Ns else np.array([0.0])
                 dists[pid][E] = dict(
                     p_m=counts / max(tot, 1),
                     Z={m: np.array(v) for m, v in Z.items() if len(v) > 0},
-                    N_mean=float(np.exp(np.median(logN))),   # robust central yield
-                    N_logsigma=float(np.std(logN)),          # event-to-event yield spread
+                    N_mean=float(np.median(Ns)) if Ns else 0.0,   # median: robust central yield
+                    N_logsigma=float(np.std(logN)),               # event-to-event yield spread
                     z_centers=x,
                 )
                 if verbose:
@@ -405,6 +409,15 @@ def load_model(path):
         return pickle.load(f)
 
 
+def save_dists(dists, path):
+    """Save the raw per-energy fit summaries (incl. the empirical (w,a,b) tuples)
+    for diagnostics: decomposition, sampling-fidelity, and leave-one-out."""
+    import pickle
+    with open(path, "wb") as f:
+        pickle.dump(dists, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"saved fit summaries -> {path}")
+
+
 # ===========================================================================
 #  Validation : are the sampled profiles physically correct?
 # ===========================================================================
@@ -539,6 +552,7 @@ def main():
         interp = ShowerParamInterpolator(dists, Kmax=args.kmax)
         if args.save:
             save_model(interp, args.save)
+            save_dists(dists, args.save.replace(".pkl", "_dists.pkl"))
 
     sampler = ShowerSampler(interp, Kmax=args.kmax)
 
