@@ -13,11 +13,14 @@ RunAction::RunAction(int pid, double energyGeV, const std::string& output)
 void RunAction::BeginOfRunAction(const G4Run*) {
     fAllProfiles.clear();
     fAllNTotal.clear();
+    fAllSubCounts.clear();
 }
 
-void RunAction::AddEvent(const std::vector<double>& histogram, double nTotal) {
+void RunAction::AddEvent(const std::vector<double>& histogram, double nTotal,
+                         const std::array<int, EventAction::N_THRESH>& subCounts) {
     fAllProfiles.push_back(histogram);
     fAllNTotal.push_back(nTotal);
+    fAllSubCounts.push_back(subCounts);
 }
 
 void RunAction::EndOfRunAction(const G4Run*) {
@@ -84,6 +87,23 @@ void RunAction::WriteHDF5() const {
         H5Sclose(space);
     }
 
+    // ── n_subcascades: (nevents, N_THRESH) int — count per fractional cut ──
+    {
+        const int nt = EventAction::N_THRESH;
+        std::vector<int> sc(static_cast<size_t>(nevents) * nt);
+        for (int i = 0; i < nevents; ++i)
+            for (int j = 0; j < nt; ++j)
+                sc[i * nt + j] = fAllSubCounts[i][j];
+        hsize_t dims[2] = {static_cast<hsize_t>(nevents),
+                           static_cast<hsize_t>(nt)};
+        hid_t space = H5Screate_simple(2, dims, nullptr);
+        hid_t dset  = H5Dcreate2(file, "n_subcascades", H5T_NATIVE_INT,
+                                  space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+        H5Dwrite(dset, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, sc.data());
+        H5Dclose(dset);
+        H5Sclose(space);
+    }
+
     // ── Attributes ────────────────────────────────────────────────────────
     {
         hid_t scalar = H5Screate(H5S_SCALAR);
@@ -105,6 +125,18 @@ void RunAction::WriteHDF5() const {
         H5Aclose(attr);
 
         H5Sclose(scalar);
+    }
+
+    // ── subcascade_thresholds: (N_THRESH,) the fractional cuts used ────────
+    {
+        hsize_t td = static_cast<hsize_t>(EventAction::N_THRESH);
+        hid_t tspace = H5Screate_simple(1, &td, nullptr);
+        hid_t tattr  = H5Acreate2(file, "subcascade_thresholds",
+                                   H5T_NATIVE_DOUBLE, tspace,
+                                   H5P_DEFAULT, H5P_DEFAULT);
+        H5Awrite(tattr, H5T_NATIVE_DOUBLE, EventAction::THRESH_FRAC);
+        H5Aclose(tattr);
+        H5Sclose(tspace);
     }
 
     H5Fclose(file);

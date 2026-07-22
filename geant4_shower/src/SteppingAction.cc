@@ -8,25 +8,43 @@
 #include "G4VPhysicalVolume.hh"
 #include "G4TouchableHandle.hh"
 #include "G4ParticleDefinition.hh"
+#include "G4VProcess.hh"
 
 #include <cmath>
+#include <string>
 
 SteppingAction::SteppingAction(EventAction* eventAction)
     : fEventAction(eventAction) {}
 
 void SteppingAction::UserSteppingAction(const G4Step* step) {
 
-    // 1. Neutral particles produce no Cherenkov radiation — skip immediately.
     const G4Track* track = step->GetTrack();
-    if (track->GetDefinition()->GetPDGCharge() == 0.0) return;
 
-    // 2. Only score inside the ice volume.
+    // 1. Only consider steps inside the ice volume.
     //    GetVolume() returns nullptr outside the world, so guard against that.
     const G4VPhysicalVolume* vol =
         step->GetPreStepPoint()->GetTouchableHandle()->GetVolume();
     if (!vol || vol->GetName() != "IceCylinder") return;
 
-    // 3. Frank-Tamm Cherenkov yield ──────────────────────────────────────────
+    // 2. Sub-cascade counting.
+    //    Count every inelastic hadronic interaction — for ANY particle,
+    //    including neutrons/K0 (so this must happen before the charge cut).
+    //    The pre-step kinetic energy is the energy entering the interaction;
+    //    EventAction applies the fractional-of-primary thresholds.
+    {
+        const G4VProcess* proc =
+            step->GetPostStepPoint()->GetProcessDefinedStep();
+        if (proc &&
+            proc->GetProcessName().find("Inelastic") != std::string::npos) {
+            fEventAction->AddInteraction(
+                step->GetPreStepPoint()->GetKineticEnergy());
+        }
+    }
+
+    // 3. Cherenkov radiation is only produced by charged particles.
+    if (track->GetDefinition()->GetPDGCharge() == 0.0) return;
+
+    // 4. Frank-Tamm Cherenkov yield ──────────────────────────────────────────
     //
     //   dN/dx = 2π α sin²θ_C (1/λ_min - 1/λ_max)
     //

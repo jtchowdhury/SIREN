@@ -14,8 +14,6 @@ Three modules in one file:
   C. Sampling       : given (type, E), sample m, then (w, alpha, beta), and build
                       a profile  N * sum_i w_i * Gamma(x; alpha_i, beta_i).
 
-(Interaction-length positioning is intentionally left out for now.)
-
 Run
 ---
     # synthetic end-to-end check (no data needed)
@@ -403,10 +401,23 @@ def save_model(interp, path):
 
 
 def load_model(path):
-    """Load a previously saved ShowerParamInterpolator."""
-    import pickle
+    """Load a saved ShowerParamInterpolator.
+
+    Uses a custom unpickler so a model saved while running this file directly
+    (`python shower_gamma_model.py ...`, which records classes under __main__)
+    still loads when this file is imported as a module (e.g. from diagnostics.py).
+    """
+    import pickle, sys
+    mod = sys.modules[__name__]
+
+    class _Unpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            if module in ("__main__", "shower_gamma_model") and hasattr(mod, name):
+                return getattr(mod, name)
+            return super().find_class(module, name)
+
     with open(path, "rb") as f:
-        return pickle.load(f)
+        return _Unpickler(f).load()
 
 
 def save_dists(dists, path):
