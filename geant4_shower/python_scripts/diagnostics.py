@@ -71,12 +71,12 @@ def _sci(E):
 # Which diagnostics to make (flip to False to skip). --plots overrides.
 # ---------------------------------------------------------------------------
 PLOT_FIT     = False    # fit-quality overlays + residual histograms  (needs --g4-dir)
-PLOT_DECOMP  = False    # p(m) vs E, and (mode,width) clouds per m
+PLOT_DECOMP  = True    # mean-alpha vs E, and (mode,width) clouds per m
 PLOT_SAMPFID = False    # fits vs samples for alpha & beta            (needs --model)
-PLOT_LOO     = False    # leave-one-energy-out interpolation error
+PLOT_LOO     = True    # leave-one-energy-out interpolation error
 PLOT_SUBCASC = False    # G4 sub-cascade multiplicity, all thresholds (needs --g4-dir)
-PLOT_SUBDIST = True    # 10% threshold only: PDF + vertical line at the median
-BUILD_MLIB   = True    # build fixed-m (=median) library over all species/energies + m-vs-E plot
+PLOT_SUBDIST = False    # 10% threshold only: PDF + vertical line at the median
+BUILD_MLIB   = False    # build fixed-m (=median) library over all species/energies + m-vs-E plot
 
 GRID_ENERGIES = [10, 30, 100, 300, 1000, 3000, 10000, 30000]  # GeV, the G4 scan grid
 SUBCASC_FRAC  = 0.10   # threshold (fraction of E_prim) that defines a sub-cascade
@@ -97,6 +97,19 @@ def _mode_width(alpha, beta):
 def _reconstruct(fit, x):
     return fit["N"] * sum(fit["w"][c] * M._kernel(x, fit["alpha"][c], fit["beta"][c])
                           for c in range(fit["m"]))
+
+
+def _mean_alpha_by_m(ed, Kmax):
+    """{m: {E: mean alpha, pooled over that m's components and all showers}}."""
+    out = {m: {} for m in range(1, Kmax + 1)}
+    for E, d in ed.items():
+        for m in range(1, Kmax + 1):
+            Z = d["Z"].get(m)
+            if Z is None or len(Z) == 0:
+                continue
+            als = [M._from_z(row, m)[1] for row in Z]   # [1] -> alpha array
+            out[m][E] = float(np.mean(np.concatenate(als)))
+    return out
 
 
 # ===========================================================================
@@ -157,16 +170,17 @@ def plot_decomposition(dists, pid, energies, out, Kmax=M.KMAX_DEFAULT):
     ed = dists.get(pid, {})
     if not ed:
         print(f"[decomp] no dists for {name}"); return
-    all_E = sorted(ed.keys())
-
-    # p(m) vs energy
+    # mean alpha vs energy (one curve per m)
+    ma = _mean_alpha_by_m(ed, Kmax)
     fig, a = plt.subplots(figsize=(8, 6))
-    for k in range(Kmax):
-        a.plot(all_E, [ed[E]["p_m"][k] for E in all_E], "o-", lw=2, ms=7, label=rf"$m={k+1}$")
-    a.set_xscale("log"); a.set_xlabel(r"$E$ [GeV]"); a.set_ylabel(r"$p(m)$")
-    a.legend(); a.set_title(rf"$p(m\,|\,E)$ — {lab}")
+    for m in range(1, Kmax + 1):
+        Es_m = sorted(ma[m])
+        if Es_m:
+            a.plot(Es_m, [ma[m][E] for E in Es_m], "o-", lw=2, ms=7, label=rf"$m={m}$")
+    a.set_xscale("log"); a.set_xlabel(r"$E$ [GeV]"); a.set_ylabel(r"mean $\alpha$")
+    a.legend(); a.set_title(rf"Mean $\alpha$ vs $E$ — {lab}")
     fig.tight_layout()
-    p = os.path.join(out, f"diag_pm_{name}.png"); fig.savefig(p, dpi=140); plt.close(fig); print("saved", p)
+    p = os.path.join(out, f"diag_alpha_vs_E_{name}.png"); fig.savefig(p, dpi=140); plt.close(fig); print("saved", p)
 
     # per m: (mode,width) scatter, one subpanel per requested energy
     for m in range(1, Kmax + 1):
@@ -262,23 +276,27 @@ def plot_loo(dists, pid, out, Kmax=M.KMAX_DEFAULT):
     Es = sorted(ed.keys())
     if len(Es) < 4:
         print(f"[loo] need >=4 energies for {name}"); return
-    held, rel_pm = [], []
-    for Eh in Es:
-        sub = {pid: {E: ed[E] for E in Es if E != Eh}}
-        it = M.ShowerParamInterpolator(sub, Kmax=Kmax)
-        pred = it.p_m(pid, Eh); true = ed[Eh]["p_m"]
-        held.append(Eh)
-        rel_pm.append(np.abs(pred - true) / np.maximum(true, 1e-3))
-    held = np.array(held); rel_pm = np.array(rel_pm)
+
+    # alpha LOO: interpolate mean alpha (per m) across energy, error at held-out E
+    ma = _mean_alpha_by_m(ed, Kmax)
     fig, a = plt.subplots(figsize=(9, 5.5))
-    for k in range(Kmax):
-        a.plot(held, rel_pm[:, k], "o-", lw=2, ms=7, label=rf"$p(m={k+1})$")
+    for m in range(1, Kmax + 1):
+        Es_m = sorted(ma[m])
+        if len(Es_m) < 3:
+            continue
+        h, rel = [], []
+        for Eh in Es_m:
+            others = [E for E in Es_m if E != Eh]
+            fspl = M._make_1d(np.log10(others), [ma[m][E] for E in others])
+            pred = float(fspl(np.log10(Eh)))
+            h.append(Eh); rel.append(abs(pred - ma[m][Eh]) / max(abs(ma[m][Eh]), 1e-9))
+        a.plot(h, rel, "o-", lw=2, ms=7, label=rf"$m={m}$")
     a.axhline(0.05, color="green", ls="--", lw=1.2, label=r"$5\%$ ref")
     a.set_xscale("log"); a.set_xlabel(r"held-out $E$ [GeV]")
-    a.set_ylabel("relative interpolation error"); a.legend()
-    a.set_title(rf"Leave-one-energy-out $p(m)$ — {lab}")
+    a.set_ylabel(r"relative interp. error in mean $\alpha$"); a.legend()
+    a.set_title(rf"Leave-one-energy-out: mean $\alpha$ — {lab}")
     fig.tight_layout()
-    p = os.path.join(out, f"diag_loo_{name}.png"); fig.savefig(p, dpi=140); plt.close(fig); print("saved", p)
+    p = os.path.join(out, f"diag_loo_alpha_{name}.png"); fig.savefig(p, dpi=140); plt.close(fig); print("saved", p)
 
 
 # ===========================================================================
