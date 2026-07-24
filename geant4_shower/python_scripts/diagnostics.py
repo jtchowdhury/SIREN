@@ -70,11 +70,16 @@ def _sci(E):
 # ---------------------------------------------------------------------------
 # Which diagnostics to make (flip to False to skip). --plots overrides.
 # ---------------------------------------------------------------------------
-PLOT_FIT     = True    # fit-quality overlays + residual histograms  (needs --g4-dir)
-PLOT_DECOMP  = True    # p(m) vs E, and (mode,width) clouds per m
-PLOT_SAMPFID = True    # fits vs samples for alpha & beta            (needs --model)
-PLOT_LOO     = True    # leave-one-energy-out interpolation error
-PLOT_SUBCASC = True    # G4 sub-cascade multiplicity, all thresholds (needs --g4-dir)
+PLOT_FIT     = False    # fit-quality overlays + residual histograms  (needs --g4-dir)
+PLOT_DECOMP  = False    # p(m) vs E, and (mode,width) clouds per m
+PLOT_SAMPFID = False    # fits vs samples for alpha & beta            (needs --model)
+PLOT_LOO     = False    # leave-one-energy-out interpolation error
+PLOT_SUBCASC = False    # G4 sub-cascade multiplicity, all thresholds (needs --g4-dir)
+PLOT_SUBDIST = True    # 10% threshold only: PDF + vertical line at the median
+BUILD_MLIB   = True    # build fixed-m (=median) library over all species/energies + m-vs-E plot
+
+GRID_ENERGIES = [10, 30, 100, 300, 1000, 3000, 10000, 30000]  # GeV, the G4 scan grid
+SUBCASC_FRAC  = 0.10   # threshold (fraction of E_prim) that defines a sub-cascade
 
 
 def _load_pickle(path):
@@ -320,6 +325,113 @@ def plot_subcascade_dist(g4_dir, pid, energies, out):
 
 
 # ===========================================================================
+# 6. SUB-CASCADE CDF at the 10% cut  ->  fixed m at a percentile
+# ===========================================================================
+def _subcasc_col(thr, frac=SUBCASC_FRAC):
+    return int(np.argmin(np.abs(np.asarray(thr) - frac)))
+
+
+def _read_subcasc(g4_dir, name, E, frac=SUBCASC_FRAC):
+    """Per-shower sub-cascade count at the ~frac threshold, or None if missing."""
+    import h5py
+    fname = os.path.join(g4_dir, f"shower_{name}_E{int(E)}GeV.h5")
+    if not os.path.exists(fname):
+        return None
+    with h5py.File(fname, "r") as f:
+        if "n_subcascades" not in f:
+            return None
+        nsc = f["n_subcascades"][:]
+        thr = np.asarray(f.attrs.get("subcascade_thresholds",
+                                     [0.01, 0.02, 0.05, 0.10, 0.20]))
+    return nsc[:, _subcasc_col(thr, frac)].astype(int)
+
+
+def _m_at_pct(counts, pct=0.5):
+    """Nearest-rank percentile: smallest integer N with fraction(count<=N) >= pct."""
+    xs = np.sort(counts)
+    k = int(np.ceil(pct * len(xs))) - 1
+    return int(xs[min(max(0, k), len(xs) - 1)])
+
+
+def plot_subcascade_median(g4_dir, pid, energies, out, frac=SUBCASC_FRAC):
+    name = M.PID_TO_NAME.get(pid, str(pid)); lab = _lab(pid)
+    Es = list(energies)
+    fig, ax = plt.subplots(1, len(Es), figsize=(6.6 * len(Es), 5.4), squeeze=False)
+    ax = ax[0]; any_data = False
+    for a, E in zip(ax, Es):
+        c = _read_subcasc(g4_dir, name, E, frac)
+        if c is None or len(c) == 0:
+            a.set_title(rf"$E={_sci(E)}$ GeV" "\n(no data)", fontsize=15); continue
+        any_data = True
+        mx = int(c.max()); bins = np.arange(-0.5, mx + 1.5, 1.0)
+        a.hist(c, bins=bins, density=True, color="steelblue", alpha=0.7)
+        med = float(np.median(c)); m = int(round(med))
+        a.axvline(med, color="red", ls="--", lw=2.5, label=rf"median $= {med:g}$")
+        a.set_title(rf"$E={_sci(E)}$ GeV   ($m={m}$)", fontsize=16)
+        a.set_xlabel(r"$N_{\rm sub\ cascades}$"); a.set_ylabel("fraction of showers")
+        a.legend()
+    fig.suptitle(rf"Sub-cascade multiplicity at {frac*100:.0f}% cut — {lab}   (red = median)")
+    fig.tight_layout()
+    p = os.path.join(out, f"diag_subcasc10_{name}.png")
+    if any_data:
+        fig.savefig(p, dpi=140); print("saved", p)
+    plt.close(fig)
+
+
+def build_subcascade_library(g4_dir, out, frac=SUBCASC_FRAC):
+    """For every species x grid energy: fixed m = median of the sub-cascade count
+    at the frac threshold. Saves CSV + pkl; returns the nested dict."""
+    lib = {}; rows = []
+    for pid, name in M.SPECIES:
+        lib[name] = {}
+        for E in GRID_ENERGIES:
+            c = _read_subcasc(g4_dir, name, E, frac)
+            if c is None or len(c) == 0:
+                continue
+            m = int(round(np.median(c)))
+            lib[name][E] = dict(m=m, median=float(np.median(c)),
+                                p25=_m_at_pct(c, 0.25),
+                                p75=_m_at_pct(c, 0.75), n=len(c))
+            rows.append((name, int(E), m))
+    csv = os.path.join(out, "subcascade_m_library.csv")
+    with open(csv, "w") as f:
+        f.write("species,energy_GeV,m\n")
+        for name, E, m in rows:
+            f.write(f"{name},{E},{m}\n")
+    pk = os.path.join(out, "subcascade_m_library.pkl")
+    with open(pk, "wb") as f:
+        pickle.dump(dict(frac=frac, stat="median", grid=GRID_ENERGIES, lib=lib), f)
+    print(f"saved {csv}  and  {pk}")
+    print(f"\nFixed m (median, {int(frac*100)}% threshold):")
+    for name in lib:
+        if lib[name]:
+            s = "  ".join(f"{E}:{lib[name][E]['m']}" for E in sorted(lib[name]))
+            print(f"  {name:4s}  {s}")
+    return dict(frac=frac, stat="median", grid=GRID_ENERGIES, lib=lib)
+
+
+def plot_m_vs_energy(mlib, pid, out):
+    name = M.PID_TO_NAME.get(pid, str(pid)); lab = _lab(pid)
+    d = mlib["lib"].get(name, {})
+    if not d:
+        print(f"[mlib] no data for {name}"); return
+    Es = sorted(d.keys())
+    m   = [d[E]["m"]   for E in Es]
+    p25 = [d[E]["p25"] for E in Es]
+    p75 = [d[E]["p75"] for E in Es]
+    fig, a = plt.subplots(figsize=(8.5, 6))
+    a.fill_between(Es, p25, p75, alpha=0.25, color="steelblue", label=r"$25$–$75\%$ spread")
+    a.plot(Es, m, "o-", color="darkblue", lw=2.5, ms=9, label=r"fixed $m$ (median)")
+    a.set_xscale("log"); a.set_xlabel(r"$E$ [GeV]"); a.set_ylabel(r"$N_{\rm sub\ cascades}$")
+    a.set_title(rf"Chosen sub-cascade count vs energy — {lab}   "
+                rf"(${int(mlib['frac']*100)}\%$ threshold)")
+    a.legend()
+    fig.tight_layout()
+    p = os.path.join(out, f"diag_m_vs_E_{name}.png"); fig.savefig(p, dpi=140); plt.close(fig)
+    print("saved", p)
+
+
+# ===========================================================================
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dists", required=True)
@@ -330,15 +442,19 @@ def main():
     ap.add_argument("--out", default=None,
                     help="output folder (default: a 'diagnostics' folder next to --dists)")
     ap.add_argument("--plots", nargs="+", default=None,
-                    choices=["all", "fit", "decomp", "sampfid", "loo", "subcasc"],
+                    choices=["all", "fit", "decomp", "sampfid", "loo",
+                             "subcasc", "subdist", "mlib"],
                     help="override the PLOT_* flags at the top of the file")
+    ap.add_argument("--subcasc-frac", type=float, default=SUBCASC_FRAC,
+                    help="sub-cascade threshold as a fraction of primary energy")
     args = ap.parse_args()
 
     want = {n for n, on in (("fit", PLOT_FIT), ("decomp", PLOT_DECOMP),
                             ("sampfid", PLOT_SAMPFID), ("loo", PLOT_LOO),
-                            ("subcasc", PLOT_SUBCASC)) if on}
+                            ("subcasc", PLOT_SUBCASC), ("subdist", PLOT_SUBDIST),
+                            ("mlib", BUILD_MLIB)) if on}
     if args.plots:
-        want = ({"fit", "decomp", "sampfid", "loo", "subcasc"}
+        want = ({"fit", "decomp", "sampfid", "loo", "subcasc", "subdist", "mlib"}
                 if "all" in args.plots else set(args.plots))
 
     out = args.out or os.path.join(os.path.dirname(os.path.abspath(args.dists)), "diagnostics")
@@ -363,12 +479,27 @@ def main():
                 print("[subcasc] skipped: pass --g4-dir")
             else:
                 plot_subcascade_dist(args.g4_dir, pid, args.energies, out)
+        if "subdist" in want:
+            if not args.g4_dir:
+                print("[subdist] skipped: pass --g4-dir")
+            else:
+                plot_subcascade_median(args.g4_dir, pid, args.energies, out,
+                                       frac=args.subcasc_frac)
         if "fit" in want:
             if not args.g4_dir:
                 print("[fit] skipped: pass --g4-dir")
             else:
                 for E in args.energies:
                     plot_fit_quality(args.g4_dir, pid, E, out)
+
+    # library over ALL species x ALL grid energies (once), + m-vs-E plots
+    if "mlib" in want:
+        if not args.g4_dir:
+            print("[mlib] skipped: pass --g4-dir")
+        else:
+            mlib = build_subcascade_library(args.g4_dir, out, frac=args.subcasc_frac)
+            for sp in args.species:
+                plot_m_vs_energy(mlib, M.NAME_TO_PID[sp], out)
     print("done ->", out)
 
 
