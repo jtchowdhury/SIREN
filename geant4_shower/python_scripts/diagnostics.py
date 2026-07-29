@@ -71,15 +71,15 @@ def _sci(E):
 # Which diagnostics to make (flip to False to skip). --plots overrides.
 # ---------------------------------------------------------------------------
 PLOT_FIT     = False    # fit-quality overlays + residual histograms  (needs --g4-dir)
-PLOT_DECOMP  = True    # mean-alpha vs E, and (mode,width) clouds per m
+PLOT_DECOMP  = False    # mean-alpha vs E, and (mode,width) clouds per m
 PLOT_SAMPFID = False    # fits vs samples for alpha & beta            (needs --model)
-PLOT_LOO     = True    # leave-one-energy-out interpolation error
+PLOT_LOO     = False    # leave-one-energy-out interpolation error
 PLOT_SUBCASC = False    # G4 sub-cascade multiplicity, all thresholds (needs --g4-dir)
-PLOT_SUBDIST = False    # 10% threshold only: PDF + vertical line at the median
-BUILD_MLIB   = False    # build fixed-m (=median) library over all species/energies + m-vs-E plot
+PLOT_SUBDIST = True    # 10% threshold only: PDF + vertical line at the median
+BUILD_MLIB   = True    # build fixed-m (=median) library over all species/energies + m-vs-E plot
 
 GRID_ENERGIES = [10, 30, 100, 300, 1000, 3000, 10000, 30000]  # GeV, the G4 scan grid
-SUBCASC_FRAC  = 0.10   # threshold (fraction of E_prim) that defines a sub-cascade
+SUBCASC_FRAC  = 0.20   # threshold (fraction of E_prim) that defines a sub-cascade
 
 
 def _load_pickle(path):
@@ -390,7 +390,7 @@ def plot_subcascade_median(g4_dir, pid, energies, out, frac=SUBCASC_FRAC):
         a.legend()
     fig.suptitle(rf"Sub-cascade multiplicity at {frac*100:.0f}% cut — {lab}   (red = median)")
     fig.tight_layout()
-    p = os.path.join(out, f"diag_subcasc10_{name}.png")
+    p = os.path.join(out, f"diag_subcasc{int(round(frac*100))}_{name}.png")
     if any_data:
         fig.savefig(p, dpi=140); print("saved", p)
     plt.close(fig)
