@@ -2,45 +2,54 @@
 compare_methods.py
 ==================
 Summary comparison of THREE profile-generation methods against the Geant4
-truth, as a function of shower energy.  This is the "scorecard" plot: every
-comparison at a given energy is boiled down to a single number, so the whole
-thing collapses into a few curves (metric on y, shower energy on x).
+truth, as a function of shower energy.  Each metric is boiled down to a single
+number per (method, energy) so the comparison collapses into clean curves.
 
-The three methods (a ladder of increasing realism):
+Methods (a ladder of increasing realism):
 
-  M1  "canonical single gamma, no fluctuation"
-        One gamma whose (alpha, beta, N) come from a single-gamma fit to the
-        G4 MEAN profile at each energy.  Deterministic -> every shower is
-        identical.  This is the current "averaged blob" baseline.
+  Fixed Single Gamma    one gamma fit to the G4 MEAN profile at each energy,
+                        deterministic -> every shower identical, zero
+                        fluctuation.  The "averaged blob" baseline.
+  Sampled Single Gamma  one gamma, (alpha, beta) drawn from the learned m=1
+                        distribution + a log-normal yield draw.
+  Gamma Mixture Model   the full sampler (sum of m gammas).
 
-  M2  "single gamma, sampled (alpha, beta) from the spline"
-        One gamma, but (alpha, beta) are drawn from the m=1 distribution the
-        model learned (interpolated in log-E), plus the log-normal yield
-        fluctuation.  Adds event-to-event fluctuation, single component.
+Metrics per (method, energy):
+  rms_yield      std of total-yield distribution            -> fluctuation SIZE
+  relrms_yield   std/mean of total yield  (sigma/mu)         -> relative fluctuation
+  resid_yield    (mean_model - mean_G4)/mean_G4              -> bias in average light
+  resid_dmax     mean(dmax_model) - mean(dmax_G4)  [cm]      -> bias in peak depth
 
-  M3  "full model"  (shower_gamma_model.ShowerSampler)
-        Sum of m gammas, m and (w, alpha, beta) sampled, plus yield.
+Yield recalibration  (the "correction")
+----------------------------------------
+The raw sampler sets the total light from a log-normal N draw whose spread
+(yield_logsigma) is estimated from the FITTED amplitude sums (sum of A_i of the
+gamma mixture).  Those amplitude sums carry extra scatter from the fit itself
+(degeneracy between components, BIC over-splitting), so their spread exceeds
+the true shower-to-shower spread of the total photon count -> the model
+OVER-fluctuates (model sigma/mu sits above G4).
 
-Metrics per (method, energy), all computed from an ensemble the same way for
-the model methods and for the G4 truth:
-
-  RMS(yield)        std of the total-yield distribution     -> fluctuation SIZE
-  relRMS(yield)     std/mean of the yield  (sigma/mu)        -> relative fluctuation
-                    == the energy-resolution-floor proxy
-  residual yield    (mean_model - mean_G4)/mean_G4           -> bias in average light
-  residual dmax     mean(dmax_model) - mean(dmax_G4)  [cm]   -> bias in peak depth
-
-M1 has zero fluctuation by construction, so its RMS and relRMS sit on the
-floor -- that is the point (it visibly fails the fluctuation metrics).
+Total light and longitudinal SHAPE are separate physical quantities, so with
+--fix-yield (default) each sampled profile's total is recalibrated directly to
+G4's own total-photon-count distribution (N_total): normalise the sampled shape
+to unit sum, then multiply by a log-normal drawn from the log-mean/log-sigma of
+G4 N_total at that energy.  Then the total-yield mean AND sigma/mu match G4 by
+construction, while the shape (and thus depth-of-max) is untouched.  This is a
+legitimate build-time calibration (the model already derives its yield stats
+from these same G4 files) -- just from the cleaner observable.  Pass
+--no-fix-yield to see the raw amplitude-based (over-fluctuating) behaviour.
 
 Run
 ---
     python compare_methods.py --g4-dir ../output \
         --model ../output/shower_model.pkl --species pip
 
-Outputs (into --outdir, default outputs/results):
-    compare_metrics_<species>.png     4-panel scorecard
-    compare_metrics_<species>.csv     the underlying numbers
+Outputs (into --outdir, default outputs/results), four separate figures + csv:
+    yield_fluctuation_rms_<sp>.png
+    relative_fluctuation_<sp>.png
+    residual_mean_yield_<sp>.png
+    residual_shower_max_<sp>.png
+    compare_metrics_<sp>.csv
 """
 
 import os
@@ -53,12 +62,32 @@ from shower_gamma_model import (
     ShowerSampler, NAME_TO_PID, PID_TO_NAME,
 )
 
+# ---------------------------------------------------------------------------
+#  cosmetics
+# ---------------------------------------------------------------------------
+G4_LABEL = "Geant4 Truth"
+G4_COLOR = "#222222"
+
+# tag -> (descriptive label, colour)
+METHOD_META = {
+    "M1": ("Fixed Single Gamma",   "#4682B4"),   # steel blue
+    "M2": ("Sampled Single Gamma", "#BA55D3"),   # medium orchid
+    "M3": ("Gamma Mixture Model",  "#FA8072"),   # salmon
+}
+
+SPECIES_LATEX = {
+    "pip": r"$\pi^{+}$", "pim": r"$\pi^{-}$", "pi0": r"$\pi^{0}$",
+    "Kp": r"$K^{+}$", "Km": r"$K^{-}$",
+    "KS": r"$K^{0}_{S}$", "KL": r"$K^{0}_{L}$",
+    "p": r"$p$", "n": r"$n$",
+}
+
 
 # ---------------------------------------------------------------------------
 #  per-ensemble reductions
 # ---------------------------------------------------------------------------
 def _yields(P):
-    """Total light per shower (bin sum), matching validate_against_g4's convention."""
+    """Total light per shower (bin sum)."""
     return P.sum(axis=1)
 
 
@@ -68,7 +97,6 @@ def _dmax(P, x):
 
 
 def ensemble_stats(P, x):
-    """Return the scalar summaries used for the metrics."""
     y = _yields(P)
     dm = _dmax(P, x)
     return dict(mean_yield=float(y.mean()),
@@ -82,50 +110,71 @@ def ensemble_stats(P, x):
 #  the three samplers
 # ---------------------------------------------------------------------------
 def method1_profile(x, g4_mean_profile):
-    """M1: deterministic single gamma fit to the G4 mean profile."""
+    """Fixed Single Gamma: deterministic single gamma fit to the G4 mean profile."""
     fit = fit_profile(x, g4_mean_profile, Kmax=1)
     prof = fit["N"] * fit["w"][0] * _kernel(x, fit["alpha"][0], fit["beta"][0])
     return prof, fit
 
 
 def method2_sample(interp, pid, E, x, rng):
-    """M2: single gamma with (alpha,beta) drawn from the m=1 distribution + yield."""
+    """Sampled Single Gamma: (alpha,beta) from the m=1 distribution + yield draw.
+    Returns (profile, N) or None if there is no m=1 model at this energy."""
     mc = interp.mean_cov(pid, E, 1)
     if mc is None:
-        return None                      # no m=1 model here -> skip this point
+        return None
     mean, cov = mc
     z = rng.multivariate_normal(mean, cov)
     sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
-    z = np.clip(z, mean - 2.5 * sd, mean + 2.5 * sd)   # same truncation as full sampler
+    z = np.clip(z, mean - 2.5 * sd, mean + 2.5 * sd)
     w, alpha, beta = _from_z(z, 1)
     N = interp.yield_mean(pid, E)
     s = interp.yield_logsigma(pid, E)
     if s > 0:
         N *= np.exp(rng.normal(0.0, s))
-    return N * w[0] * _kernel(x, alpha[0], beta[0])
+    return N * w[0] * _kernel(x, alpha[0], beta[0]), N
 
 
-def build_ensembles(interp, sampler, library, pid, E, x, n_sample, rng):
-    """Return {method: (n_sample, nbins) profile array} for M1/M2/M3, plus G4."""
+def _finalize(profs, g4_N, rng, fix_yield):
+    """Stack the sampled profiles.  With fix_yield, recalibrate each profile's
+    total light to G4's own N_total distribution (log-normal), decoupled from the
+    sampled shape: total-yield mean and sigma/mu then match G4 by construction,
+    while the shape (depth-of-max, width) is untouched."""
+    if not profs:
+        return None
+    P = np.array(profs)
+    if fix_yield:
+        logN = np.log(np.maximum(np.asarray(g4_N, float), 1e-30))
+        mu, sig = float(logN.mean()), float(logN.std())
+        shape = P / P.sum(axis=1, keepdims=True)          # unit-sum shapes
+        Y = np.exp(rng.normal(mu, sig, size=len(P)))       # G4-calibrated total
+        P = shape * Y[:, None]
+    return P
+
+
+def build_ensembles(interp, sampler, library, pid, E, x, n_sample, rng, fix_yield=True):
     g4 = library[pid][E]["profiles"]
     g4_mean = g4.mean(axis=0)
+    g4_N = library[pid][E].get("N_total")
+    if g4_N is None:
+        g4_N = g4.sum(axis=1)
 
-    # M1 deterministic -> replicate the single profile so every reduction is uniform
+    # Fixed Single Gamma (deterministic; NOT recalibrated -- it is the baseline)
     p1, _ = method1_profile(x, g4_mean)
     M1 = np.tile(p1, (n_sample, 1))
 
-    # M2 single-gamma sampled
-    m2_rows = []
+    # Sampled Single Gamma
+    m2p, ok = [], True
     for _ in range(n_sample):
-        p = method2_sample(interp, pid, E, x, rng)
-        if p is None:
-            m2_rows = None
+        r = method2_sample(interp, pid, E, x, rng)
+        if r is None:
+            ok = False
             break
-        m2_rows.append(p)
-    M2 = np.array(m2_rows) if m2_rows is not None else None
+        m2p.append(r[0])
+    M2 = _finalize(m2p, g4_N, rng, fix_yield) if ok else None
 
-    # M3 full model
-    M3 = np.array([sampler.sample_profile(pid, E, rng, x=x)[0] for _ in range(n_sample)])
+    # Gamma Mixture Model (full)
+    m3p = [sampler.sample_profile(pid, E, rng, x=x)[0] for _ in range(n_sample)]
+    M3 = _finalize(m3p, g4_N, rng, fix_yield)
 
     return dict(G4=g4, M1=M1, M2=M2, M3=M3)
 
@@ -133,15 +182,16 @@ def build_ensembles(interp, sampler, library, pid, E, x, n_sample, rng):
 # ---------------------------------------------------------------------------
 #  driver for one species
 # ---------------------------------------------------------------------------
-def run_species(interp, sampler, library, pid, n_sample, seed, outdir):
+def run_species(interp, sampler, library, pid, n_sample, seed, outdir, fix_yield=True):
     name = PID_TO_NAME.get(pid, str(pid))
     energies = sorted(library[pid].keys())
     rng = np.random.default_rng(seed)
 
-    rows = []   # flat table: one row per (E, method)
+    rows = []
     for E in energies:
         x = library[pid][E]["z_centers"]
-        ens = build_ensembles(interp, sampler, library, pid, E, x, n_sample, rng)
+        ens = build_ensembles(interp, sampler, library, pid, E, x, n_sample, rng,
+                              fix_yield=fix_yield)
         g4 = ensemble_stats(ens["G4"], x)
         for tag in ("G4", "M1", "M2", "M3"):
             P = ens[tag]
@@ -158,7 +208,7 @@ def run_species(interp, sampler, library, pid, n_sample, seed, outdir):
             ))
 
     _write_csv(rows, os.path.join(outdir, f"compare_metrics_{name}.csv"))
-    _plot(rows, name, os.path.join(outdir, f"compare_metrics_{name}.png"))
+    _make_all_plots(rows, name, outdir)
     return rows
 
 
@@ -182,79 +232,79 @@ def _series(rows, method, key):
     return np.array([d["E"] for d in r]), np.array([d[key] for d in r], float)
 
 
-def _plot(rows, name, path):
+def _one_plot(rows, key, title, ylabel, outpath, method_tags,
+              include_g4=False, logy=False, hline=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    styles = {  # tag: (label, color)
-        "G4": ("G4 truth", "k"),
-        "M1": ("M1  single gamma, no fluct.", "tab:blue"),
-        "M2": ("M2  single gamma, sampled", "tab:orange"),
-        "M3": ("M3  full model", "tab:red"),
-    }
+    fig, ax = plt.subplots(figsize=(8.2, 6.2))
+    if hline is not None:
+        ax.axhline(hline, color="#999999", ls="--", lw=1.3, zorder=1)
 
-    fig, ax = plt.subplots(2, 2, figsize=(13, 10))
-
-    # (a) absolute RMS of yield ------------------------------------------------
-    for tag, (lab, c) in styles.items():
-        E, v = _series(rows, tag, "rms_yield")
+    def _draw(tag, label, color, dashed=False):
+        E, v = _series(rows, tag, key)
         if len(E) == 0:
-            continue
-        ls = "--" if tag == "G4" else "-"
-        ax[0, 0].plot(E, v, ls, marker="o", ms=4, color=c, label=lab)
-    ax[0, 0].set_xscale("log"); ax[0, 0].set_yscale("log")
-    ax[0, 0].set_xlabel("shower energy [GeV]"); ax[0, 0].set_ylabel("RMS of total yield")
-    ax[0, 0].set_title("(a) yield fluctuation SIZE  (RMS)")
-    ax[0, 0].legend(fontsize=8)
+            return
+        ax.plot(E, v, ls="--" if dashed else "-", color=color, lw=2.6,
+                marker="o", ms=10, markeredgecolor="white", markeredgewidth=1.4,
+                alpha=0.85, label=label, zorder=5 if dashed else 4)
 
-    # (b) relative RMS  sigma/mu ----------------------------------------------
-    for tag, (lab, c) in styles.items():
-        E, v = _series(rows, tag, "relrms_yield")
-        if len(E) == 0:
-            continue
-        ls = "--" if tag == "G4" else "-"
-        ax[0, 1].plot(E, v, ls, marker="o", ms=4, color=c, label=lab)
-    ax[0, 1].set_xscale("log")
-    ax[0, 1].set_xlabel("shower energy [GeV]"); ax[0, 1].set_ylabel(r"$\sigma/\mu$ of yield")
-    ax[0, 1].set_title(r"(b) RELATIVE yield fluctuation  ($\sigma/\mu$)")
-    ax[0, 1].legend(fontsize=8)
+    if include_g4:
+        _draw("G4", G4_LABEL, G4_COLOR, dashed=True)
+    for tag in method_tags:
+        label, color = METHOD_META[tag]
+        _draw(tag, label, color)
 
-    # (c) residual yield -------------------------------------------------------
-    ax[1, 0].axhline(0.0, color="k", ls="--", lw=1)
-    for tag, (lab, c) in styles.items():
-        if tag == "G4":
-            continue
-        E, v = _series(rows, tag, "resid_yield")
-        if len(E) == 0:
-            continue
-        ax[1, 0].plot(E, v, "-", marker="o", ms=4, color=c, label=lab)
-    ax[1, 0].set_xscale("log")
-    ax[1, 0].set_xlabel("shower energy [GeV]")
-    ax[1, 0].set_ylabel(r"$(\mu_{\rm model}-\mu_{\rm G4})/\mu_{\rm G4}$")
-    ax[1, 0].set_title("(c) residual MEAN yield  (bias)")
-    ax[1, 0].legend(fontsize=8)
-
-    # (d) residual shower max --------------------------------------------------
-    ax[1, 1].axhline(0.0, color="k", ls="--", lw=1)
-    for tag, (lab, c) in styles.items():
-        if tag == "G4":
-            continue
-        E, v = _series(rows, tag, "resid_dmax")
-        if len(E) == 0:
-            continue
-        ax[1, 1].plot(E, v, "-", marker="o", ms=4, color=c, label=lab)
-    ax[1, 1].set_xscale("log")
-    ax[1, 1].set_xlabel("shower energy [GeV]")
-    ax[1, 1].set_ylabel(r"$\overline{d_{\max}}_{\rm model}-\overline{d_{\max}}_{\rm G4}$ [cm]")
-    ax[1, 1].set_title("(d) residual shower max  (bias)")
-    ax[1, 1].legend(fontsize=8)
-
-    fig.suptitle(f"Method comparison vs G4 — {name}", fontsize=15)
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
-    fig.savefig(path, dpi=140)
+    ax.set_xscale("log")
+    if logy:
+        ax.set_yscale("log")
+    ax.set_xlabel("Shower Energy [GeV]", fontsize=16)
+    ax.set_ylabel(ylabel, fontsize=16)
+    ax.set_title(title, fontsize=18, fontweight="bold", pad=12)
+    ax.tick_params(axis="both", which="major", labelsize=13, length=6)
+    ax.grid(True, which="major", ls=":", lw=0.9, color="#bbbbbb", alpha=0.7)
+    ax.legend(fontsize=13, framealpha=0.92, loc="best")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=150)
     plt.close(fig)
-    print(f"  wrote {path}")
+    print(f"  wrote {outpath}")
+
+
+def _make_all_plots(rows, name, outdir):
+    sp = SPECIES_LATEX.get(name, name)
+
+    # 1) absolute RMS  (drop Fixed Single Gamma: it is exactly 0 -> invalid on log)
+    _one_plot(
+        rows, "rms_yield",
+        f"Cherenkov Photon Yield Fluctuation ({sp})",
+        "RMS of Total Yield  [photons]",
+        os.path.join(outdir, f"yield_fluctuation_rms_{name}.png"),
+        method_tags=["M2", "M3"], include_g4=True, logy=True)
+
+    # 2) relative RMS  (keep Fixed Single Gamma: its flat 0 shows "no fluctuation")
+    _one_plot(
+        rows, "relrms_yield",
+        f"Relative Fluctuation in Cherenkov Photon Yield ({sp})",
+        r"$\sigma / \mu$ of Total Yield",
+        os.path.join(outdir, f"relative_fluctuation_{name}.png"),
+        method_tags=["M1", "M2", "M3"], include_g4=True, logy=False)
+
+    # 3) residual mean yield  (G4 is the zero line)
+    _one_plot(
+        rows, "resid_yield",
+        f"Residual of Mean Yield ({sp})",
+        r"$(\mu_{\mathrm{model}} - \mu_{\mathrm{G4}}) \,/\, \mu_{\mathrm{G4}}$",
+        os.path.join(outdir, f"residual_mean_yield_{name}.png"),
+        method_tags=["M1", "M2", "M3"], include_g4=False, hline=0.0)
+
+    # 4) residual shower max
+    _one_plot(
+        rows, "resid_dmax",
+        f"Residual of Maximum Shower Depth ({sp})",
+        r"Mean $d_{\mathrm{max}}$:  Model $-$ Geant4  [cm]",
+        os.path.join(outdir, f"residual_shower_max_{name}.png"),
+        method_tags=["M1", "M2", "M3"], include_g4=False, hline=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +319,10 @@ def main():
     ap.add_argument("--n-sample", type=int, default=2000,
                     help="showers sampled per method per energy")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--outdir", default="outputs/results")
+    ap.add_argument("--outdir",
+                    default="/n/home13/jchowdhury/SIREN/geant4_shower/output/plots/result")
+    ap.add_argument("--no-fix-yield", dest="fix_yield", action="store_false",
+                    help="disable yield/shape decoupling (show the over-fluctuation)")
     args = ap.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -286,7 +339,8 @@ def main():
         if pid not in library:
             print(f"skip '{sp}': no G4 files loaded for it"); continue
         print(f"== {sp} ==")
-        run_species(interp, sampler, library, pid, args.n_sample, args.seed, args.outdir)
+        run_species(interp, sampler, library, pid, args.n_sample, args.seed,
+                    args.outdir, fix_yield=args.fix_yield)
 
 
 if __name__ == "__main__":
