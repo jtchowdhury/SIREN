@@ -45,13 +45,15 @@ from shower_gamma_model import (
 #  labels/colours: replace "Single Gamma" with "Fixed 2-Gamma" (same colours)
 # ---------------------------------------------------------------------------
 ALT_META = {
-    "M1": ("Current Analytic Approx.", "#4682B4"),   # steel blue
-    "M2": ("Fixed 2-Gamma",            "#BA55D3"),   # medium orchid
-    "M3": ("Gamma Mixture Model",      "#FA8072"),   # salmon
+    "M1": ("Current Analytic Approx.", "#4682B4"),      # steel blue
+    "SG": ("Sampled Single Gamma",     "#BA55D3"),      # medium orchid
+    "F2": ("Fixed 2-Gamma",            "lightseagreen"),
+    "M3": ("Gamma Mixture Model",      "#FA8072"),      # salmon
 }
 FIT_META_ALT = {
     "analytic": ("Analytic (fixed shape)", "#4682B4"),
-    "twogamma": ("2-Gamma Fit",            "#BA55D3"),
+    "single":   ("Single Gamma Fit",       "#BA55D3"),
+    "twogamma": ("2-Gamma Fit",            "lightseagreen"),
     "mixture":  ("Gamma Mixture Fit",       "#FA8072"),
 }
 
@@ -89,19 +91,30 @@ def build_ensembles(interp, sampler, library, pid, E, x, n_sample, rng, fix_yiel
     p1, _ = C.method1_profile(x, g4_mean, E)
     M1 = np.tile(p1, (n_sample, 1))
 
-    m2p, ok = [], True
+    # Sampled Single Gamma (m=1)
+    sgp, ok_sg = [], True
+    for _ in range(n_sample):
+        r = C.method2_sample(interp, pid, E, x, rng)
+        if r is None:
+            ok_sg = False
+            break
+        sgp.append(r[0])
+    SG = C._finalize(sgp, g4_N, rng, fix_yield) if ok_sg else None
+
+    # Fixed 2-Gamma (m=2)
+    f2p, ok2 = [], True
     for _ in range(n_sample):
         r = method_2gamma_sample(interp, pid, E, x, rng)
         if r is None:
-            ok = False
+            ok2 = False
             break
-        m2p.append(r[0])
-    M2 = C._finalize(m2p, g4_N, rng, fix_yield) if ok else None
+        f2p.append(r[0])
+    F2 = C._finalize(f2p, g4_N, rng, fix_yield) if ok2 else None
 
     m3p = [sampler.sample_profile(pid, E, rng, x=x)[0] for _ in range(n_sample)]
     M3 = C._finalize(m3p, g4_N, rng, fix_yield)
 
-    return dict(G4=g4, M1=M1, M2=M2, M3=M3)
+    return dict(G4=g4, M1=M1, SG=SG, F2=F2, M3=M3)
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +137,7 @@ def fit_l2_forms_alt(g4_profiles, x, E, n_fit, rng):
     alpha = 0.3 + 0.7 * np.log(E / C.HAD_EC_GEV)
     ashape = _kernel(np.asarray(x, float) / C.X0_ICE_CM, alpha, 0.9)
     aa = float(np.dot(ashape, ashape))
-    res = {"analytic": [], "twogamma": [], "mixture": []}
+    res = {"analytic": [], "single": [], "twogamma": [], "mixture": []}
     for i in idx:
         g = g4_profiles[i]
         denom = float(np.dot(g, g))
@@ -132,6 +145,8 @@ def fit_l2_forms_alt(g4_profiles, x, E, n_fit, rng):
             continue
         c = float(np.dot(g, ashape)) / aa if aa > 0 else 0.0
         res["analytic"].append(float(np.sum((g - c * ashape) ** 2)) / denom)
+        f1 = fit_profile(x, g, Kmax=1)
+        res["single"].append(float(np.sum((g - C._fit_curve(x, f1)) ** 2)) / denom)
         try:
             f2 = fit_exact2(x, g)
             res["twogamma"].append(float(np.sum((g - C._fit_curve(x, f2)) ** 2)) / denom)
@@ -158,7 +173,7 @@ def run_species(interp, sampler, library, pid, n_sample, seed, outdir,
                               fix_yield=fix_yield)
         g4 = C.ensemble_stats(ens["G4"], x)
         g4_ms, g4_ss = C._shape_profiles(ens["G4"])
-        for tag in ("G4", "M1", "M2", "M3"):
+        for tag in ("G4", "M1", "SG", "F2", "M3"):
             P = ens[tag]
             if P is None:
                 continue
@@ -193,43 +208,43 @@ def _make_alt_plots(rows, fit_rows, name, outdir):
        f"Cherenkov Photon Yield Fluctuation ({sp})",
        "RMS of Total Yield  [photons]",
        p(f"yield_fluctuation_rms_{name}.png"),
-       method_tags=["M2", "M3"], meta=ALT_META, include_g4=True, logy=True)
+       method_tags=["SG", "F2", "M3"], meta=ALT_META, include_g4=True, logy=True)
 
     op(rows, "relrms_yield",
        f"Relative Fluctuation in Cherenkov Photon Yield ({sp})",
        r"$\sigma / \mu$ of Total Yield",
        p(f"relative_fluctuation_{name}.png"),
-       method_tags=["M1", "M2", "M3"], meta=ALT_META, include_g4=True, logy=False)
+       method_tags=["M1", "SG", "F2", "M3"], meta=ALT_META, include_g4=True, logy=False)
 
     op(rows, "resid_yield",
        f"Residual of Mean Yield ({sp})",
        r"$(\mu_{\mathrm{model}} - \mu_{\mathrm{G4}}) \,/\, \mu_{\mathrm{G4}}$",
        p(f"residual_mean_yield_{name}.png"),
-       method_tags=["M1", "M2", "M3"], meta=ALT_META, include_g4=False, hline=0.0)
+       method_tags=["M1", "SG", "F2", "M3"], meta=ALT_META, include_g4=False, hline=0.0)
 
     op(rows, "resid_dmax",
        f"Residual of Maximum Shower Depth ({sp})",
        r"Mean $d_{\mathrm{max}}$:  Model $-$ Geant4  [cm]",
        p(f"residual_shower_max_{name}.png"),
-       method_tags=["M1", "M2", "M3"], meta=ALT_META, include_g4=False, hline=0.0)
+       method_tags=["M1", "SG", "F2", "M3"], meta=ALT_META, include_g4=False, hline=0.0)
 
     op(rows, "l2_mean",
        f"Mean-Shape $L_2$ vs Geant4 ({sp})",
        r"$\sum_x (\bar S_{\mathrm{G4}} - \bar S_{\mathrm{model}})^2$",
        p(f"l2_mean_shape_{name}.png"),
-       method_tags=["M1", "M2", "M3"], meta=ALT_META, include_g4=False, logy=True)
+       method_tags=["M1", "SG", "F2", "M3"], meta=ALT_META, include_g4=False, logy=True)
 
     op(rows, "l2_fluc",
        f"Shape-Fluctuation $L_2$ vs Geant4 ({sp})",
        r"$\sum_x (\sigma^{S}_{\mathrm{G4}} - \sigma^{S}_{\mathrm{model}})^2$",
        p(f"l2_fluctuation_shape_{name}.png"),
-       method_tags=["M1", "M2", "M3"], meta=ALT_META, include_g4=False, logy=True)
+       method_tags=["M1", "SG", "F2", "M3"], meta=ALT_META, include_g4=False, logy=True)
 
     op(fit_rows, "fit_l2",
        f"Fit Residual vs Geant4 ({sp})",
        r"$\sum_x (g - \mathrm{fit})^2 \,/\, \sum_x g^2$",
        p(f"fit_residual_l2_{name}.png"),
-       method_tags=["analytic", "twogamma", "mixture"], meta=FIT_META_ALT,
+       method_tags=["analytic", "single", "twogamma", "mixture"], meta=FIT_META_ALT,
        match_key="form", include_g4=False, logy=True)
 
 
