@@ -458,16 +458,16 @@ def _plot_l2_ks(pe_rows, name, outdir, sigma_cm):
 
     draw(ax1, "l2")
     ax1.set_yscale("log")
-    ax1.set_ylabel(r"per-event $L_2$   $\sum_x(\mathrm{data}-\mathrm{model})^2/\sum_x\mathrm{data}^2$",
+    ax1.set_ylabel(r"per-event $L_2$ ($\sum(\mathrm{data}-\mathrm{model})^2/\sum\mathrm{data}^2$)",
                    fontsize=13)
-    ax1.set_title(f"Per-Event Reconstruction vs Detector-Blurred Geant4 ({sp})\n"
-                  rf"G4 smeared with Gaussian $\sigma={sigma_cm:.0f}$ cm  ($v=c/n$, 2 ns)",
+    ax1.set_title(f"Per-Event Reconstruction vs Convolved Geant4 ({sp})",
                   fontsize=15, fontweight="bold", pad=10)
     ax1.legend(fontsize=12, framealpha=0.92, loc="best")
 
     draw(ax2, "ks")
     ax2.set_xscale("log")
-    ax2.set_ylabel("KS statistic  (max CDF gap)", fontsize=14)
+    ax2.set_yscale("log")
+    ax2.set_ylabel("KS statistic", fontsize=14)
     ax2.set_xlabel("Shower Energy [GeV]", fontsize=15)
 
     fig.tight_layout()
