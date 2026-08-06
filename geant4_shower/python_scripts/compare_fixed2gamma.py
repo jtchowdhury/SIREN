@@ -47,7 +47,7 @@ from shower_gamma_model import (
 ALT_META = {
     "M1": ("Current Analytic Approx.", "#4682B4"),      # steel blue
     "SG": ("Sampled Single Gamma",     "#BA55D3"),      # medium orchid
-    "F2": ("Fixed 2-Gamma",            "lightseagreen"),
+    "F2": ("Sampled 2-Gamma",          "lightseagreen"),
     "M3": ("Gamma Mixture Model",      "#FA8072"),      # salmon
 }
 FIT_META_ALT = {
@@ -241,8 +241,8 @@ def _make_alt_plots(rows, fit_rows, name, outdir):
        method_tags=["M1", "SG", "F2", "M3"], meta=ALT_META, include_g4=False, logy=True)
 
     op(fit_rows, "fit_l2",
-       f"Fit Residual vs Geant4 ({sp})",
-       r"$\sum_x (g - \mathrm{fit})^2 \,/\, \sum_x g^2$",
+       f"Per-Event Reconstruction $L_2$ vs Geant4 ({sp})",
+       r"$\langle\, \sum_x (\mathrm{data}-\mathrm{model})^2 / \sum_x \mathrm{data}^2 \,\rangle$  per event",
        p(f"fit_residual_l2_{name}.png"),
        method_tags=["analytic", "single", "twogamma", "mixture"], meta=FIT_META_ALT,
        match_key="form", include_g4=False, logy=True)
