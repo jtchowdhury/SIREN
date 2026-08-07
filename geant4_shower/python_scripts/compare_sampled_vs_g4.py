@@ -127,11 +127,13 @@ def _plot(rows, name, outdir, sigma_cm):
         if len(Ef):
             ax.plot(Ef, vf, "--", color="#444444", lw=2.0, alpha=0.9,
                     label="G4 vs G4 (empirical floor)")
+        '''
         if val_key == "ks":
             Et, vt = C._series(rows, "ks_theory", "ks", match_key="form")
             if len(Et):
                 ax.plot(Et, vt, ":", color="#c0392b", lw=2.4, alpha=0.95,
                         label=r"Theory floor (95% KS)")
+        '''
         ax.grid(True, which="major", ls=":", lw=0.9, color="#bbbbbb", alpha=0.7)
         ax.tick_params(axis="both", which="major", labelsize=12, length=6)
 
