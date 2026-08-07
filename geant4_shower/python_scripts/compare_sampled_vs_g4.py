@@ -1,26 +1,13 @@
 """
 compare_sampled_vs_g4.py
 ========================
-A different comparison from the per-event reconstruction plot.
+Performance comparison of our shower model to Geant4 showers using L2 and KS metrics.
 
 Here we compare a shower our model GENERATED to a shower Geant4 produced:
   - draw a shower from the G4 data sample,
   - draw a shower from our sampled model (gamma mixture / single gamma / analytic),
   - pair them (random pairing -- they have no 1-to-1 correspondence),
   - score the pair with a plain L2 and a KS, and average over many pairs.
-
-Three curves vs energy, one per model.  Because a generated shower and a G4
-shower are both random draws, this measures "how far a typical generated shower
-is from a typical real shower" -- it folds in both model bias AND the intrinsic
-shower-to-shower scatter (so a perfect model would land at the G4-vs-G4 level).
-
-Detector resolution: the G4 shower is blurred with a Gaussian (sigma = c/n * 2ns
-~ 45 cm); the generated shower is left as-is (per Andy).  Generated yields are
-recalibrated to the G4 total-light distribution, so L2 is a fair shape+yield
-comparison and isn't swamped by a yield offset.
-
-Same 2-panel layout / colours / labels as perevent_l2ks.
-
 Run
 ---
     python compare_sampled_vs_g4.py --species pip
@@ -36,11 +23,13 @@ from shower_gamma_model import (
     load_model, load_g4_library, ShowerSampler, NAME_TO_PID, PID_TO_NAME,
 )
 import compare_methods as C
+import compare_fixed2gamma as F   # its build_ensembles also yields the fixed 2-gamma
 
 # same colours as perevent_l2ks; labels reflect that these are SAMPLES, not fits
 SAMPLED_META = {
     "analytic": ("Analytic (fixed shape)", "#4682B4"),   # steel blue
     "single":   ("Sampled Single Gamma",   "#BA55D3"),   # medium orchid
+    "twogamma": ("Sampled 2-Gamma",         "lightseagreen"),
     "mixture":  ("Gamma Mixture Model",     "#FA8072"),   # salmon
 }
 
@@ -70,24 +59,47 @@ def sampled_vs_g4(g4, gen, x, sigma_cm, rng):
             float(np.mean(kss)) if kss else np.nan)
 
 
+def g4_vs_g4(g4, x, sigma_cm, rng):
+    """Empirical floor: compare one (blurred) G4 shower to ANOTHER raw G4 shower,
+    scored exactly like the model comparison (disjoint halves, no self-pairing)."""
+    m = len(g4)
+    half = m // 2
+    if half < 1:
+        return np.nan, np.nan
+    perm = rng.permutation(m)
+    A = g4[perm[:half]]
+    B = g4[perm[half:2 * half]]
+    return sampled_vs_g4(A, B, x, sigma_cm, rng)
+
+
 def run_species(interp, sampler, library, pid, n_sample, seed, outdir, sigma_cm):
     name = PID_TO_NAME.get(pid, str(pid))
     rng = np.random.default_rng(seed)
     rows = []
     for E in sorted(library[pid].keys()):
         x = library[pid][E]["z_centers"]
-        ens = C.build_ensembles(interp, sampler, library, pid, E, x, n_sample,
-                                rng, fix_yield=True)
+        ens = F.build_ensembles(interp, sampler, library, pid, E, x, n_sample,
+                                rng, fix_yield=True)   # G4, M1, SG, F2, M3
         g4 = ens["G4"]
-        for tag, form in (("M1", "analytic"), ("M2", "single"), ("M3", "mixture")):
+        for tag, form in (("M1", "analytic"), ("SG", "single"),
+                          ("F2", "twogamma"), ("M3", "mixture")):
             gen = ens[tag]
             if gen is None:
                 continue
             l2, ks = sampled_vs_g4(g4, gen, x, sigma_cm, rng)
             rows.append(dict(species=name, E=E, form=form, l2=l2, ks=ks))
-        print(f"  E={E:8.0f}  " +
-              "  ".join(f"{r['form']}:L2={r['l2']:.2g},KS={r['ks']:.2g}"
-                       for r in rows if r["E"] == E))
+
+        # empirical floor: one G4 shower vs another G4 shower
+        fl2, fks = g4_vs_g4(g4, x, sigma_cm, rng)
+        rows.append(dict(species=name, E=E, form="g4floor", l2=fl2, ks=fks))
+        # theoretical two-sample KS floor (95% critical, n=m=N_G4)
+        N = len(g4)
+        rows.append(dict(species=name, E=E, form="ks_theory", l2=float("nan"),
+                         ks=float(1.358 * np.sqrt(2.0 / N)) if N > 0 else float("nan")))
+
+        msg = "  ".join(f"{r['form']}:KS={r['ks']:.2g}" for r in rows if r["E"] == E
+                        and r["form"] in ("single", "twogamma", "mixture", "g4floor"))
+        print(f"  E={E:8.0f}  {msg}")
 
     C._write_l2ks_csv(rows, os.path.join(outdir, f"sampled_vs_g4_{name}.csv"))
     _plot(rows, name, outdir, sigma_cm)
@@ -103,7 +115,7 @@ def _plot(rows, name, outdir, sigma_cm):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8.2, 9.4), sharex=True)
 
     def draw(ax, val_key):
-        for form in ("analytic", "single", "mixture"):
+        for form in ("analytic", "single", "twogamma", "mixture"):
             label, color = SAMPLED_META[form]
             E, v = C._series(rows, form, val_key, match_key="form")
             if len(E) == 0:
@@ -111,22 +123,32 @@ def _plot(rows, name, outdir, sigma_cm):
             ax.plot(E, v, "-", color=color, lw=2.6, marker="o", ms=10,
                     markeredgecolor="white", markeredgewidth=1.4, alpha=0.85,
                     label=label)
+        Ef, vf = C._series(rows, "g4floor", val_key, match_key="form")
+        if len(Ef):
+            ax.plot(Ef, vf, "--", color="#444444", lw=2.0, alpha=0.9,
+                    label="G4 vs G4 (empirical floor)")
+        if val_key == "ks":
+            Et, vt = C._series(rows, "ks_theory", "ks", match_key="form")
+            if len(Et):
+                ax.plot(Et, vt, ":", color="#c0392b", lw=2.4, alpha=0.95,
+                        label=r"Theory floor (95% KS)")
         ax.grid(True, which="major", ls=":", lw=0.9, color="#bbbbbb", alpha=0.7)
         ax.tick_params(axis="both", which="major", labelsize=12, length=6)
 
     draw(ax1, "l2")
     ax1.set_yscale("log")
-    ax1.set_ylabel(r"$L_2$   $\sum_x(\mathrm{data}-\mathrm{model})^2/\sum_x\mathrm{data}^2$",
+    ax1.set_ylabel(r"$L_2$ ($\sum(\mathrm{data}-\mathrm{model})^2/\sum\mathrm{data}^2$)",
                    fontsize=13)
-    ax1.set_title(f"Sampled Model Shower vs Geant4 Shower ({sp})\n"
-                  rf"G4 smeared with Gaussian $\sigma={sigma_cm:.0f}$ cm  ($v=c/n$, 2 ns)",
+    ax1.set_title(f"Sampled Model Shower vs Geant4 Shower ({sp})\n",
                   fontsize=15, fontweight="bold", pad=10)
-    ax1.legend(fontsize=12, framealpha=0.92, loc="best")
+    ax1.legend(fontsize=11, framealpha=0.92, loc="best")
 
     draw(ax2, "ks")
     ax2.set_xscale("log")
-    ax2.set_ylabel("KS statistic  (max CDF gap)", fontsize=14)
+    ax2.set_yscale("log")
+    ax2.set_ylabel("KS statistic", fontsize=14)
     ax2.set_xlabel("Shower Energy [GeV]", fontsize=15)
+    ax2.legend(fontsize=11, framealpha=0.92, loc="best")
 
     fig.tight_layout()
     out = os.path.join(outdir, f"sampled_vs_g4_{name}.png")
