@@ -274,6 +274,7 @@ def perevent_l2_ks_forms(g4_profiles, x, E, n_fit, rng, sigma_cm):
     ashape = _kernel(np.asarray(x, float) / X0_ICE_CM, alpha, 0.9)
     aa = float(np.dot(ashape, ashape))
     out = {f: {"l2": [], "ks": []} for f in ("analytic", "single", "mixture")}
+    blurred = []                        # (profile, ||.||^2, CDF) for the G4-vs-G4 floor
     for i in idx:
         g = gaussian_filter1d(np.asarray(g4_profiles[i], float), sig_bins, mode="constant")
         denom = float(np.dot(g, g))
@@ -281,6 +282,7 @@ def perevent_l2_ks_forms(g4_profiles, x, E, n_fit, rng, sigma_cm):
             continue
         gpos = np.clip(g, 0.0, None); gsum = gpos.sum()
         cdf_g = np.cumsum(gpos) / gsum if gsum > 0 else None
+        blurred.append((g, denom, cdf_g))
         c = float(np.dot(g, ashape)) / aa if aa > 0 else 0.0
         fits = {"analytic": c * ashape,
                 "single":   _fit_curve(x, fit_profile(x, g, Kmax=1)),
@@ -292,9 +294,33 @@ def perevent_l2_ks_forms(g4_profiles, x, E, n_fit, rng, sigma_cm):
                 if fs > 0:
                     out[form]["ks"].append(
                         float(np.max(np.abs(np.cumsum(fp) / fs - cdf_g))))
-    return {f: {"l2": float(np.mean(d["l2"])) if d["l2"] else np.nan,
-                "ks": float(np.mean(d["ks"])) if d["ks"] else np.nan}
-            for f, d in out.items()}
+
+    # statistical floor: pair up INDEPENDENT G4 showers and score them the same
+    # way (blurred, no fit).  Two real showers already differ this much from
+    # shower-to-shower fluctuations -- so this is the best any model can do.
+    fl_l2, fl_ks = [], []
+    m = len(blurred); half = m // 2
+    perm = rng.permutation(m)
+    for k in range(half):
+        gA, dA, cA = blurred[perm[k]]
+        gB, dB, cB = blurred[perm[k + half]]
+        fl_l2.append(float(np.sum((gA - gB) ** 2)) / (0.5 * (dA + dB)))
+        if cA is not None and cB is not None:
+            fl_ks.append(float(np.max(np.abs(cA - cB))))
+
+    res = {f: {"l2": float(np.mean(d["l2"])) if d["l2"] else np.nan,
+               "ks": float(np.mean(d["ks"])) if d["ks"] else np.nan}
+           for f, d in out.items()}
+    res["g4floor"] = {"l2": float(np.mean(fl_l2)) if fl_l2 else np.nan,
+                      "ks": float(np.mean(fl_ks)) if fl_ks else np.nan}
+
+    # theoretical two-sample KS floor: 95% critical value for n=m=N_G4 showers,
+    #   D_0.05 = 1.358 * sqrt((n+m)/(n*m)) = 1.358 * sqrt(2/N).
+    # (distribution-free in 1-D; no L2 analog, so l2 is left NaN)
+    N = len(g4_profiles)
+    res["ks_theory"] = {"l2": float("nan"),
+                        "ks": float(1.358 * np.sqrt(2.0 / N)) if N > 0 else float("nan")}
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +479,15 @@ def _plot_l2_ks(pe_rows, name, outdir, sigma_cm):
             ax.plot(E, v, "-", color=color, lw=2.6, marker="o", ms=10,
                     markeredgecolor="white", markeredgewidth=1.4, alpha=0.85,
                     label=label)
+        Ef, vf = _series(pe_rows, "g4floor", val_key, match_key="form")
+        if len(Ef):
+            ax.plot(Ef, vf, "--", color="#444444", lw=2.0, alpha=0.9,
+                    label="G4 vs G4 (empirical floor)")
+        if val_key == "ks":
+            Et, vt = _series(pe_rows, "ks_theory", "ks", match_key="form")
+            if len(Et):
+                ax.plot(Et, vt, ":", color="#c0392b", lw=2.4, alpha=0.95,
+                        label=r"theory floor (95% KS, $n=m=N_{\mathrm{G4}}$)")
         ax.grid(True, which="major", ls=":", lw=0.9, color="#bbbbbb", alpha=0.7)
         ax.tick_params(axis="both", which="major", labelsize=12, length=6)
 
