@@ -146,9 +146,11 @@ def _initial_guess(x, y, K, smooth=5):
     return p0, (lo, hi)
 
 
-def fit_profile(x, y, Kmax=KMAX_DEFAULT):
+def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
     """
     Fit y(x) as sums of 1..Kmax gammas; pick K by BIC.
+    `penalty` (lambda) multiplies the BIC complexity term: >1 favours fewer
+    gammas (extra components must earn a bigger residual drop to be selected).
     Returns dict with m, w (fractional, sums to 1), alpha, beta, N (total yield),
     and the BIC/rss trace.
     """
@@ -170,7 +172,7 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT):
         resid = y - _mixture(x, *popt)
         rss = float(np.sum(resid ** 2))
         k = 3 * K
-        bic = n_eff * np.log(max(rss, 1e-30) / n) + k * np.log(n_eff)
+        bic = n_eff * np.log(max(rss, 1e-30) / n) + penalty * k * np.log(n_eff)
         trace[K] = bic
         if best is None or bic < best["bic"]:
             A = np.array(popt[0::3]); al = np.array(popt[1::3]); be = np.array(popt[2::3])
@@ -189,26 +191,50 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT):
 # ===========================================================================
 #  MODULE A (aggregation) : empirical distributions per (type, E)
 # ===========================================================================
+def _comp_to_z(alpha, beta):
+    """One gamma (alpha, beta) -> (log centroid, log width).
+    centroid c = alpha/beta (mean depth of the bump); width s = sqrt(alpha)/beta
+    (its std). These are what the data actually pins down and are near-orthogonal,
+    unlike (alpha, beta) which slide together along a degenerate ridge -- so a
+    Gaussian sampled in (log c, log s) yields far fewer invalid draws."""
+    alpha = np.asarray(alpha, float); beta = np.asarray(beta, float)
+    c = alpha / beta
+    s = np.sqrt(alpha) / beta
+    return np.log(c), np.log(s)
+
+
+def _comp_from_z(lc, ls):
+    """Exact inverse of _comp_to_z: (log centroid, log width) -> (alpha, beta)."""
+    c = np.exp(np.asarray(lc, float)); s = np.exp(np.asarray(ls, float))
+    alpha = (c / s) ** 2
+    beta = c / s ** 2
+    return alpha, beta
+
+
 def _to_z(w, alpha, beta):
-    """Map (w, alpha, beta) of an m-component fit to an unconstrained vector."""
+    """Map (w, alpha, beta) of an m-component fit to an unconstrained vector.
+    Per-component shape is stored as (log centroid, log width) -- NOT (log alpha,
+    log beta) -- to remove the alpha-beta degeneracy that spoils sampling."""
     m = len(alpha)
-    la, lb = np.log(alpha), np.log(beta)
+    lc, ls = _comp_to_z(alpha, beta)                    # each length m
     if m == 1:
-        return np.concatenate([la, lb])                 # dim 2
+        return np.array([lc[0], ls[0]])                 # dim 2
     w = np.clip(w, 1e-6, None); w = w / w.sum()
     alr = np.log(w[:-1]) - np.log(w[-1])                # dim m-1
-    return np.concatenate([alr, la, lb])                # dim 3m-1
+    return np.concatenate([alr, lc, ls])                # dim 3m-1
 
 
 def _from_z(z, m):
     if m == 1:
-        return np.array([1.0]), np.array([np.exp(z[0])]), np.array([np.exp(z[1])])
-    alr = z[:m - 1]; la = z[m - 1:2 * m - 1]; lb = z[2 * m - 1:3 * m - 1]
+        a, b = _comp_from_z(z[0], z[1])
+        return np.array([1.0]), np.array([float(a)]), np.array([float(b)])
+    alr = z[:m - 1]; lc = z[m - 1:2 * m - 1]; ls = z[2 * m - 1:3 * m - 1]
     e = np.exp(np.concatenate([alr, [0.0]])); w = e / e.sum()
-    return w, np.exp(la), np.exp(lb)
+    a, b = _comp_from_z(lc, ls)                          # arrays length m
+    return w, np.asarray(a, float), np.asarray(b, float)
 
 
-def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1):
+def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, penalty=1.0):
     """
     Fit every run and aggregate.  Fitting is embarrassingly parallel; set
     n_jobs>1 (or -1 for all cores) to fit profiles across worker processes.
@@ -227,9 +253,9 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1):
                 x = d["z_centers"]; profs = d["profiles"]
                 valid = [y for y in profs if y.max() > 0]
                 if pool is not None:
-                    fits = pool.starmap(fit_profile, [(x, y, Kmax) for y in valid])
+                    fits = pool.starmap(fit_profile, [(x, y, Kmax, penalty) for y in valid])
                 else:
-                    fits = [fit_profile(x, y, Kmax) for y in valid]
+                    fits = [fit_profile(x, y, Kmax, penalty) for y in valid]
                 counts = np.zeros(Kmax, dtype=int)
                 Z = {m: [] for m in range(1, Kmax + 1)}
                 Ns = []
@@ -548,6 +574,10 @@ def main():
     ap.add_argument("--species", default="pip")
     ap.add_argument("--energy", type=float, default=1000.0)
     ap.add_argument("--kmax", type=int, default=KMAX_DEFAULT)
+    ap.add_argument("--bic-penalty", type=float, default=1.0,
+                    help="lambda: multiplier on the BIC complexity penalty. "
+                         "1.0 = default; >1 uses more than one gamma only when a "
+                         "second peak/deformation is clearly resolved.")
     ap.add_argument("--save", default=None, help="pickle the built model to this path")
     ap.add_argument("--load", default=None, help="load a prebuilt model instead of refitting")
     ap.add_argument("--n-jobs", type=int, default=1, help="parallel fit workers (-1 = all cores)")
@@ -565,7 +595,8 @@ def main():
         print(f"loaded model from {args.load}")
     else:                                 # build from G4 files (slow; save it!)
         lib = load_g4_library(args.g4_dir)
-        dists = build_distributions(lib, Kmax=args.kmax, n_jobs=args.n_jobs)
+        dists = build_distributions(lib, Kmax=args.kmax, n_jobs=args.n_jobs,
+                                    penalty=args.bic_penalty)
         interp = ShowerParamInterpolator(dists, Kmax=args.kmax)
         if args.save:
             save_model(interp, args.save)
