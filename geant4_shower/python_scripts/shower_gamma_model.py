@@ -61,6 +61,8 @@ PID_TO_NAME = {pid: name for pid, name in SPECIES}
 
 KMAX_DEFAULT = 3
 MIN_SAMPLES_FOR_COV = 12   # min runs at an (m, E) to estimate a covariance
+BIC_RES_CM = 45.0          # detector depth resolution: bins finer than this are
+                           # correlated, so BIC counts resolution elements, not bins
 
 
 # ===========================================================================
@@ -151,6 +153,10 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT):
     and the BIC/rss trace.
     """
     n = len(x)
+    dx = float(np.median(np.diff(x))) if n > 1 else 1.0
+    # honest sample count: neighbouring bins within the detector resolution are
+    # correlated, so score by resolvable elements (span / res), not raw bins.
+    n_eff = max(n * dx / BIC_RES_CM, 3.0)
     total = _trapz(y, x)
     best = None
     trace = {}
@@ -164,7 +170,7 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT):
         resid = y - _mixture(x, *popt)
         rss = float(np.sum(resid ** 2))
         k = 3 * K
-        bic = n * np.log(max(rss, 1e-30) / n) + k * np.log(n)
+        bic = n_eff * np.log(max(rss, 1e-30) / n) + k * np.log(n_eff)
         trace[K] = bic
         if best is None or bic < best["bic"]:
             A = np.array(popt[0::3]); al = np.array(popt[1::3]); be = np.array(popt[2::3])
