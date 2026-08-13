@@ -66,7 +66,8 @@ BIC_RES_CM = 45.0          # detector depth resolution: bins finer than this are
 GATE_VALLEY_FRAC = 0.05    # m>=2 kept only if the dip between adjacent peaks is at
                            # least this fraction below the lower peak (else it is a
                            # broadened shoulder, not a resolved second cascade)
-GATE_MIN_WEIGHT = 0.10     # ...and every component must carry >=10% of the light
+GATE_MIN_WEIGHT = 0.10     # ...and the smaller component must be >=10% of the BIGGER
+                           # one (ratio min(w)/max(w)); set 0.05 for a 5% threshold
 
 
 # ===========================================================================
@@ -155,7 +156,7 @@ def _resolved(x, w, alpha, beta, res_cm=BIC_RES_CM,
     """Gate for accepting an m>=2 fit: the components must form a genuinely
     RESOLVED multi-peak profile, not one hump built from overlapping pieces
     (which fits well but samples badly). Require:
-      (a) every component carries >= min_w of the light,
+      (a) the smaller component is >= min_w of the bigger (ratio min(w)/max(w)),
       (b) adjacent component modes (peaks) are >= res_cm apart,
       (c) the summed curve dips >= valley_frac below the lower of the two peaks
           somewhere between them (a real valley, not a shoulder).
@@ -166,7 +167,7 @@ def _resolved(x, w, alpha, beta, res_cm=BIC_RES_CM,
     if m == 1:
         return True
     w = np.asarray(w, float); alpha = np.asarray(alpha, float); beta = np.asarray(beta, float)
-    if np.min(w) < min_w:                                    # (a) weight floor
+    if np.min(w) / np.max(w) < min_w:                        # (a) smaller vs bigger weight
         return False
     modes = np.maximum(alpha - 1.0, 1e-6) / beta             # per-component peak depth
     o = np.argsort(modes)                                    # sort by position
@@ -191,7 +192,7 @@ def _gate_flags(x, w, alpha, beta, res_cm=BIC_RES_CM,
     FAILS, evaluated independently (a fit may fail more than one). Returns
     (weight_fail, sep_fail, valley_fail).  demoted == any of the three."""
     w = np.asarray(w, float); alpha = np.asarray(alpha, float); beta = np.asarray(beta, float)
-    weight_fail = bool(np.min(w) < min_w)
+    weight_fail = bool(np.min(w) / np.max(w) < min_w)        # smaller < min_w of bigger
     modes = np.maximum(alpha - 1.0, 1e-6) / beta
     o = np.argsort(modes)
     modes, alpha, beta, w = modes[o], alpha[o], beta[o], w[o]
@@ -262,13 +263,14 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
         best = dict(m=1, w=np.array([1.0]), alpha=np.array([4.0]),
                     beta=np.array([4.0 / max(_trapz(x * y, x) / max(total, 1e-9), 1.0)]),
                     N=total, bic=np.inf)
-    # gate bookkeeping: did BIC want m>=2, and if so was it demoted & why?
-    gate = dict(wanted=False, m=0, weight_fail=False, sep_fail=False,
-                valley_fail=False, demoted=False)
+    # gate bookkeeping: did BIC want m>=2, and if so which cut FIRST rejects it,
+    # in the cascade order significance(weight) -> resolution(sep) -> valley?
+    gate = dict(wanted=False, m=0, stage="", demoted=False)
     if raw_best is not None and raw_best["m"] >= 2:
         wf, sf, vf = _gate_flags(x, raw_best["w"], raw_best["alpha"], raw_best["beta"])
-        gate = dict(wanted=True, m=int(raw_best["m"]), weight_fail=wf, sep_fail=sf,
-                    valley_fail=vf, demoted=bool(wf or sf or vf))
+        stage = "weight" if wf else "sep" if sf else "valley" if vf else "kept"
+        gate = dict(wanted=True, m=int(raw_best["m"]), stage=stage,
+                    demoted=(stage != "kept"))
     best["gate"] = gate
     best["bic_trace"] = trace
     return best
@@ -348,7 +350,7 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                 Z = {m: [] for m in range(1, Kmax + 1)}
                 Ns = []
                 gs = gate_stats.setdefault(float(E), dict(
-                    n_wanted=0, sep_fail=0, valley_fail=0, weight_fail=0, demoted=0))
+                    n_wanted=0, rej_weight=0, rej_sep=0, rej_valley=0))
                 for fit in fits:
                     m = fit["m"]
                     counts[m - 1] += 1
@@ -357,10 +359,13 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                     g = fit.get("gate")
                     if g and g["wanted"]:                       # BIC wanted m>=2 here
                         gs["n_wanted"] += 1
-                        gs["sep_fail"] += int(g["sep_fail"])
-                        gs["valley_fail"] += int(g["valley_fail"])
-                        gs["weight_fail"] += int(g["weight_fail"])
-                        gs["demoted"] += int(g["demoted"])
+                        st = g["stage"]                         # first cut to reject it
+                        if st == "weight":
+                            gs["rej_weight"] += 1
+                        elif st == "sep":
+                            gs["rej_sep"] += 1
+                        elif st == "valley":
+                            gs["rej_valley"] += 1
                 tot = counts.sum()
                 # Yield stats come from the FITTED amplitudes (sum of A_i). These are
                 # the units the sampler rebuilds in (N * unit-area kernels -> a bin sum
@@ -389,12 +394,13 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
             os.makedirs(d, exist_ok=True)
         with open(gate_csv, "w", newline="") as fcsv:
             wr = _csv.writer(fcsv)
-            wr.writerow(["E", "n_wanted", "sep_fail", "valley_fail",
-                         "weight_fail", "demoted"])
+            # rej_* are MUTUALLY EXCLUSIVE (first cut to reject, cascade order
+            # weight -> sep -> valley); survivors = n_wanted - sum(rej_*).
+            wr.writerow(["E", "n_wanted", "rej_weight", "rej_sep", "rej_valley"])
             for E in sorted(gate_stats):
                 g = gate_stats[E]
-                wr.writerow([E, g["n_wanted"], g["sep_fail"], g["valley_fail"],
-                             g["weight_fail"], g["demoted"]])
+                wr.writerow([E, g["n_wanted"], g["rej_weight"],
+                             g["rej_sep"], g["rej_valley"]])
         if verbose:
             print(f"  wrote gate-demotion stats -> {gate_csv}")
     return dists
