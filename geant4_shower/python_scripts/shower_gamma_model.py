@@ -156,28 +156,59 @@ def _resolved(x, w, alpha, beta, res_cm=BIC_RES_CM,
     RESOLVED multi-peak profile, not one hump built from overlapping pieces
     (which fits well but samples badly). Require:
       (a) every component carries >= min_w of the light,
-      (b) the summed curve has >= m local maxima, each adjacent pair >= res_cm apart,
-      (c) the dip between adjacent peaks is >= valley_frac below the lower peak.
-    A broadened shoulder (fewer maxima than components, or too shallow a dip)
-    fails and is demoted. m==1 always passes."""
+      (b) adjacent component modes (peaks) are >= res_cm apart,
+      (c) the summed curve dips >= valley_frac below the lower of the two peaks
+          somewhere between them (a real valley, not a shoulder).
+    A broadened shoulder (no real dip between the component peaks) fails and is
+    demoted. Keying off the component modes (not find_peaks of the summed curve)
+    avoids the edge blind spot for deep peaks and the overlap bias. m==1 passes."""
     m = len(w)
     if m == 1:
         return True
+    w = np.asarray(w, float); alpha = np.asarray(alpha, float); beta = np.asarray(beta, float)
     if np.min(w) < min_w:                                    # (a) weight floor
         return False
+    modes = np.maximum(alpha - 1.0, 1e-6) / beta             # per-component peak depth
+    o = np.argsort(modes)                                    # sort by position
+    modes, alpha, beta, w = modes[o], alpha[o], beta[o], w[o]
     f = np.sum([w[i] * _kernel(x, alpha[i], beta[i]) for i in range(m)], axis=0)
-    pk, _ = find_peaks(f)
-    if len(pk) < m:                                          # (b) shoulder, not m humps
-        return False
-    top = np.sort(pk[np.argsort(f[pk])[::-1][:m]])           # m strongest, by position
-    for j in range(len(top) - 1):
-        i1, i2 = int(top[j]), int(top[j + 1])
-        if (x[i2] - x[i1]) < res_cm:                         # (b) peaks resolved?
+    idx = np.clip(np.searchsorted(x, modes), 0, len(x) - 1)  # nearest bin to each mode
+    for j in range(m - 1):
+        if (modes[j + 1] - modes[j]) < res_cm:              # (b) peaks resolved?
             return False
-        valley = float(f[i1:i2 + 1].min())
-        if valley > (1.0 - valley_frac) * min(f[i1], f[i2]):  # (c) real dip?
+        a, b = int(idx[j]), int(idx[j + 1])
+        if b <= a:
+            return False
+        valley = float(f[a:b + 1].min())                    # dip between the two modes
+        if valley > (1.0 - valley_frac) * min(f[a], f[b]):  # (c) a real valley?
             return False
     return True
+
+
+def _gate_flags(x, w, alpha, beta, res_cm=BIC_RES_CM,
+                valley_frac=GATE_VALLEY_FRAC, min_w=GATE_MIN_WEIGHT):
+    """Diagnostic companion to _resolved: which gate conditions an m>=2 fit
+    FAILS, evaluated independently (a fit may fail more than one). Returns
+    (weight_fail, sep_fail, valley_fail).  demoted == any of the three."""
+    w = np.asarray(w, float); alpha = np.asarray(alpha, float); beta = np.asarray(beta, float)
+    weight_fail = bool(np.min(w) < min_w)
+    modes = np.maximum(alpha - 1.0, 1e-6) / beta
+    o = np.argsort(modes)
+    modes, alpha, beta, w = modes[o], alpha[o], beta[o], w[o]
+    f = np.sum([w[i] * _kernel(x, alpha[i], beta[i]) for i in range(len(w))], axis=0)
+    idx = np.clip(np.searchsorted(x, modes), 0, len(x) - 1)
+    sep_fail = valley_fail = False
+    for j in range(len(w) - 1):
+        if (modes[j + 1] - modes[j]) < res_cm:
+            sep_fail = True
+        a, b = int(idx[j]), int(idx[j + 1])
+        if b > a:
+            valley = float(f[a:b + 1].min())
+            if valley > (1.0 - valley_frac) * min(f[a], f[b]):
+                valley_fail = True
+        else:
+            valley_fail = True
+    return weight_fail, sep_fail, valley_fail
 
 
 def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
@@ -198,6 +229,7 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
     n_eff = max(n * dx / BIC_RES_CM, 3.0)
     total = _trapz(y, x)
     best = None
+    raw_best = None                        # lowest-BIC fit IGNORING the gate
     trace = {}
     for K in range(1, Kmax + 1):
         try:
@@ -216,6 +248,8 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
         Asum = A.sum()
         cand = dict(m=K, w=A / Asum if Asum > 0 else np.ones(K) / K,
                     alpha=al, beta=be, N=Asum if Asum > 0 else total, bic=bic)
+        if raw_best is None or bic < raw_best["bic"]:
+            raw_best = cand                # what BIC would pick with no gate
         # resolution/separation gate: an m>=2 fit is eligible only if its
         # components are genuinely resolved; an unresolved shoulder is a
         # shape-correction that samples badly, so it is skipped (demoting to
@@ -228,6 +262,14 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
         best = dict(m=1, w=np.array([1.0]), alpha=np.array([4.0]),
                     beta=np.array([4.0 / max(_trapz(x * y, x) / max(total, 1e-9), 1.0)]),
                     N=total, bic=np.inf)
+    # gate bookkeeping: did BIC want m>=2, and if so was it demoted & why?
+    gate = dict(wanted=False, m=0, weight_fail=False, sep_fail=False,
+                valley_fail=False, demoted=False)
+    if raw_best is not None and raw_best["m"] >= 2:
+        wf, sf, vf = _gate_flags(x, raw_best["w"], raw_best["alpha"], raw_best["beta"])
+        gate = dict(wanted=True, m=int(raw_best["m"]), weight_fail=wf, sep_fail=sf,
+                    valley_fail=vf, demoted=bool(wf or sf or vf))
+    best["gate"] = gate
     best["bic_trace"] = trace
     return best
 
@@ -278,7 +320,8 @@ def _from_z(z, m):
     return w, np.asarray(a, float), np.asarray(b, float)
 
 
-def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, penalty=1.0):
+def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, penalty=1.0,
+                        gate_csv=None):
     """
     Fit every run and aggregate.  Fitting is embarrassingly parallel; set
     n_jobs>1 (or -1 for all cores) to fit profiles across worker processes.
@@ -290,6 +333,7 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
         import multiprocessing as mp
         pool = mp.Pool(processes=(None if n_jobs < 0 else n_jobs))
     dists = {}
+    gate_stats = {}      # E -> counts, summed over ALL species (for the loss plot)
     try:
         for pid, edata in library.items():
             dists[pid] = {}
@@ -303,11 +347,20 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                 counts = np.zeros(Kmax, dtype=int)
                 Z = {m: [] for m in range(1, Kmax + 1)}
                 Ns = []
+                gs = gate_stats.setdefault(float(E), dict(
+                    n_wanted=0, sep_fail=0, valley_fail=0, weight_fail=0, demoted=0))
                 for fit in fits:
                     m = fit["m"]
                     counts[m - 1] += 1
                     Z[m].append(_to_z(fit["w"], fit["alpha"], fit["beta"]))
                     Ns.append(fit["N"])
+                    g = fit.get("gate")
+                    if g and g["wanted"]:                       # BIC wanted m>=2 here
+                        gs["n_wanted"] += 1
+                        gs["sep_fail"] += int(g["sep_fail"])
+                        gs["valley_fail"] += int(g["valley_fail"])
+                        gs["weight_fail"] += int(g["weight_fail"])
+                        gs["demoted"] += int(g["demoted"])
                 tot = counts.sum()
                 # Yield stats come from the FITTED amplitudes (sum of A_i). These are
                 # the units the sampler rebuilds in (N * unit-area kernels -> a bin sum
@@ -329,6 +382,21 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
     finally:
         if pool is not None:
             pool.close(); pool.join()
+    if gate_csv:
+        import csv as _csv
+        d = os.path.dirname(gate_csv)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(gate_csv, "w", newline="") as fcsv:
+            wr = _csv.writer(fcsv)
+            wr.writerow(["E", "n_wanted", "sep_fail", "valley_fail",
+                         "weight_fail", "demoted"])
+            for E in sorted(gate_stats):
+                g = gate_stats[E]
+                wr.writerow([E, g["n_wanted"], g["sep_fail"], g["valley_fail"],
+                             g["weight_fail"], g["demoted"]])
+        if verbose:
+            print(f"  wrote gate-demotion stats -> {gate_csv}")
     return dists
 
 
@@ -639,8 +707,10 @@ def main():
         print(f"loaded model from {args.load}")
     else:                                 # build from G4 files (slow; save it!)
         lib = load_g4_library(args.g4_dir)
+        gate_csv = (args.save.replace(".pkl", "_gate_stats.csv")
+                    if args.save else None)
         dists = build_distributions(lib, Kmax=args.kmax, n_jobs=args.n_jobs,
-                                    penalty=args.bic_penalty)
+                                    penalty=args.bic_penalty, gate_csv=gate_csv)
         interp = ShowerParamInterpolator(dists, Kmax=args.kmax)
         if args.save:
             save_model(interp, args.save)

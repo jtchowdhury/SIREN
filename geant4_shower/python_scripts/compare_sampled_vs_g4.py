@@ -162,6 +162,56 @@ def _plot(rows, name, outdir, sigma_cm, suffix=""):
     print(f"  wrote {out}")
 
 
+def _plot_gamma_loss(csv_path, outdir):
+    """One plot, all species combined: of the showers where BIC wanted m>=2,
+    what % the resolution/separation gate demoted vs energy. Three curves:
+    (1) peaks not separated (<45 cm), (2) a component <10% of the light,
+    (3) total demoted (any reason -- includes the valley condition)."""
+    import csv as _csv
+    if not os.path.exists(csv_path):
+        print(f"  gamma-loss: no gate CSV at {csv_path} "
+              f"(rebuild the model with --save to generate it)")
+        return
+    E, sep, wt, tot = [], [], [], []
+    with open(csv_path) as f:
+        for r in _csv.DictReader(f):
+            nw = float(r["n_wanted"])
+            if nw <= 0:
+                continue
+            E.append(float(r["E"]))
+            sep.append(100.0 * float(r["sep_fail"]) / nw)
+            wt.append(100.0 * float(r["weight_fail"]) / nw)
+            tot.append(100.0 * float(r["demoted"]) / nw)
+    if not E:
+        print("  gamma-loss: gate CSV has no m>=2 cases to plot"); return
+    order = np.argsort(E); E = np.array(E)[order]
+    sep = np.array(sep)[order]; wt = np.array(wt)[order]; tot = np.array(tot)[order]
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(8.2, 5.2))
+    ax.plot(E, sep, "-o", color="#E67E22", lw=2.6, ms=10, markeredgecolor="white",
+            markeredgewidth=1.4, alpha=0.9, label="peaks not resolved (<45 cm apart)")
+    ax.plot(E, wt, "-s", color="#8E44AD", lw=2.6, ms=9, markeredgecolor="white",
+            markeredgewidth=1.4, alpha=0.9, label="a component < 10% of the light")
+    ax.plot(E, tot, "-^", color="#2C3E50", lw=2.6, ms=10, markeredgecolor="white",
+            markeredgewidth=1.4, alpha=0.9, label="total demoted (any reason)")
+    ax.set_xscale("log")
+    ax.set_xlabel("Shower Energy [GeV]", fontsize=15)
+    ax.set_ylabel("% of BIC m$\\geq$2 fits demoted", fontsize=14)
+    ax.set_title("Gamma-mixture demotions by the resolution gate (all species)\n",
+                 fontsize=15, fontweight="bold", pad=10)
+    ax.grid(True, which="major", ls=":", lw=0.9, color="#bbbbbb", alpha=0.7)
+    ax.tick_params(axis="both", which="major", labelsize=12, length=6)
+    ax.legend(fontsize=11, framealpha=0.92, loc="best")
+    fig.tight_layout()
+    os.makedirs(outdir, exist_ok=True)
+    out = os.path.join(outdir, "sampled_vs_g4_gamma_loss.png")
+    fig.savefig(out, dpi=150); plt.close(fig)
+    print(f"  wrote {out}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--g4-dir", default="../output/data")
@@ -176,6 +226,10 @@ def main():
                     help="compare against RAW (unblurred) G4; disables the ~45cm detector blur. "
                          "Writes *_noblur.png/.csv so the blurred results aren't overwritten.")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--gate-csv", default=None,
+                    help="gate-demotion stats CSV from the model build "
+                         "(default: <g4-dir>/shower_model_gate_stats.csv); "
+                         "used for sampled_vs_g4_gamma_loss.png")
     ap.add_argument("--outdir",
                     default="/n/home13/jchowdhury/SIREN/geant4_shower/output/plots/result")
     args = ap.parse_args()
@@ -200,6 +254,10 @@ def main():
         print(f"== {sp} ==")
         run_species(interp, sampler, library, pid, args.n_sample, args.seed,
                     args.outdir, sigma_cm, suffix)
+
+    # combined-species gamma-mixture demotion plot (reads the model's gate CSV)
+    gate_csv = args.gate_csv or os.path.join(args.g4_dir, "shower_model_gate_stats.csv")
+    _plot_gamma_loss(gate_csv, args.outdir)
 
 
 if __name__ == "__main__":
