@@ -63,6 +63,10 @@ KMAX_DEFAULT = 3
 MIN_SAMPLES_FOR_COV = 12   # min runs at an (m, E) to estimate a covariance
 BIC_RES_CM = 45.0          # detector depth resolution: bins finer than this are
                            # correlated, so BIC counts resolution elements, not bins
+GATE_VALLEY_FRAC = 0.05    # m>=2 kept only if the dip between adjacent peaks is at
+                           # least this fraction below the lower peak (else it is a
+                           # broadened shoulder, not a resolved second cascade)
+GATE_MIN_WEIGHT = 0.10     # ...and every component must carry >=10% of the light
 
 
 # ===========================================================================
@@ -146,11 +150,44 @@ def _initial_guess(x, y, K, smooth=5):
     return p0, (lo, hi)
 
 
+def _resolved(x, w, alpha, beta, res_cm=BIC_RES_CM,
+              valley_frac=GATE_VALLEY_FRAC, min_w=GATE_MIN_WEIGHT):
+    """Gate for accepting an m>=2 fit: the components must form a genuinely
+    RESOLVED multi-peak profile, not one hump built from overlapping pieces
+    (which fits well but samples badly). Require:
+      (a) every component carries >= min_w of the light,
+      (b) the summed curve has >= m local maxima, each adjacent pair >= res_cm apart,
+      (c) the dip between adjacent peaks is >= valley_frac below the lower peak.
+    A broadened shoulder (fewer maxima than components, or too shallow a dip)
+    fails and is demoted. m==1 always passes."""
+    m = len(w)
+    if m == 1:
+        return True
+    if np.min(w) < min_w:                                    # (a) weight floor
+        return False
+    f = np.sum([w[i] * _kernel(x, alpha[i], beta[i]) for i in range(m)], axis=0)
+    pk, _ = find_peaks(f)
+    if len(pk) < m:                                          # (b) shoulder, not m humps
+        return False
+    top = np.sort(pk[np.argsort(f[pk])[::-1][:m]])           # m strongest, by position
+    for j in range(len(top) - 1):
+        i1, i2 = int(top[j]), int(top[j + 1])
+        if (x[i2] - x[i1]) < res_cm:                         # (b) peaks resolved?
+            return False
+        valley = float(f[i1:i2 + 1].min())
+        if valley > (1.0 - valley_frac) * min(f[i1], f[i2]):  # (c) real dip?
+            return False
+    return True
+
+
 def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
     """
     Fit y(x) as sums of 1..Kmax gammas; pick K by BIC.
     `penalty` (lambda) multiplies the BIC complexity term: >1 favours fewer
     gammas (extra components must earn a bigger residual drop to be selected).
+    An m>=2 fit is additionally kept only if it passes _resolved() (peaks a
+    detector-resolution apart, a real valley between them, each weight >=10%);
+    otherwise it is demoted to the best resolved / single-gamma fit.
     Returns dict with m, w (fractional, sums to 1), alpha, beta, N (total yield),
     and the BIC/rss trace.
     """
@@ -174,12 +211,19 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
         k = 3 * K
         bic = n_eff * np.log(max(rss, 1e-30) / n) + penalty * k * np.log(n_eff)
         trace[K] = bic
+        A = np.array(popt[0::3]); al = np.array(popt[1::3]); be = np.array(popt[2::3])
+        A, al, be = _sort_components(A, al, be)
+        Asum = A.sum()
+        cand = dict(m=K, w=A / Asum if Asum > 0 else np.ones(K) / K,
+                    alpha=al, beta=be, N=Asum if Asum > 0 else total, bic=bic)
+        # resolution/separation gate: an m>=2 fit is eligible only if its
+        # components are genuinely resolved; an unresolved shoulder is a
+        # shape-correction that samples badly, so it is skipped (demoting to
+        # the best resolved lower-K fit -- ultimately the single gamma).
+        if not _resolved(x, cand["w"], cand["alpha"], cand["beta"]):
+            continue
         if best is None or bic < best["bic"]:
-            A = np.array(popt[0::3]); al = np.array(popt[1::3]); be = np.array(popt[2::3])
-            A, al, be = _sort_components(A, al, be)
-            Asum = A.sum()
-            best = dict(m=K, w=A / Asum if Asum > 0 else np.ones(K) / K,
-                        alpha=al, beta=be, N=Asum if Asum > 0 else total, bic=bic)
+            best = cand
     if best is None:                       # every fit failed -> 1 broad gamma
         best = dict(m=1, w=np.array([1.0]), alpha=np.array([4.0]),
                     beta=np.array([4.0 / max(_trapz(x * y, x) / max(total, 1e-9), 1.0)]),
