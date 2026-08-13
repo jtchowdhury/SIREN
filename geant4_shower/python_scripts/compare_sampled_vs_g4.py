@@ -164,15 +164,16 @@ def _plot(rows, name, outdir, sigma_cm, suffix=""):
 
 def _plot_gamma_loss(csv_path, outdir):
     """One plot, all species combined: of the showers where BIC wanted m>=2,
-    what % the resolution/separation gate demoted vs energy. Three curves:
-    (1) peaks not separated (<45 cm), (2) a component <10% of the light,
-    (3) total demoted (any reason -- includes the valley condition)."""
+    what % the resolution gate demoted vs energy. Curves = the three failure
+    conditions (a fit may fail several, so they need not sum to the total):
+    (1) peaks <45 cm apart, (2) no >=5% valley between them, (3) a component
+    <10% of the light, plus (4) total demoted (union of any reason)."""
     import csv as _csv
     if not os.path.exists(csv_path):
         print(f"  gamma-loss: no gate CSV at {csv_path} "
               f"(rebuild the model with --save to generate it)")
         return
-    E, sep, wt, tot = [], [], [], []
+    E, sep, val, wt, tot = [], [], [], [], []
     with open(csv_path) as f:
         for r in _csv.DictReader(f):
             nw = float(r["n_wanted"])
@@ -180,19 +181,23 @@ def _plot_gamma_loss(csv_path, outdir):
                 continue
             E.append(float(r["E"]))
             sep.append(100.0 * float(r["sep_fail"]) / nw)
+            val.append(100.0 * float(r["valley_fail"]) / nw)
             wt.append(100.0 * float(r["weight_fail"]) / nw)
             tot.append(100.0 * float(r["demoted"]) / nw)
     if not E:
         print("  gamma-loss: gate CSV has no m>=2 cases to plot"); return
     order = np.argsort(E); E = np.array(E)[order]
-    sep = np.array(sep)[order]; wt = np.array(wt)[order]; tot = np.array(tot)[order]
+    sep = np.array(sep)[order]; val = np.array(val)[order]
+    wt = np.array(wt)[order]; tot = np.array(tot)[order]
 
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(8.2, 5.2))
     ax.plot(E, sep, "-o", color="#E67E22", lw=2.6, ms=10, markeredgecolor="white",
-            markeredgewidth=1.4, alpha=0.9, label="peaks not resolved (<45 cm apart)")
+            markeredgewidth=1.4, alpha=0.9, label="peaks < 45 cm apart")
+    ax.plot(E, val, "-D", color="#27AE60", lw=2.6, ms=8, markeredgecolor="white",
+            markeredgewidth=1.4, alpha=0.9, label="no valley (< 5% dip)")
     ax.plot(E, wt, "-s", color="#8E44AD", lw=2.6, ms=9, markeredgecolor="white",
             markeredgewidth=1.4, alpha=0.9, label="a component < 10% of the light")
     ax.plot(E, tot, "-^", color="#2C3E50", lw=2.6, ms=10, markeredgecolor="white",
