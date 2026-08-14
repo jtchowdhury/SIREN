@@ -230,6 +230,7 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
     n_eff = max(n * dx / BIC_RES_CM, 3.0)
     total = _trapz(y, x)
     best = None
+    best_nov = None                        # valley-OFF selection (dip test disabled)
     raw_best = None                        # lowest-BIC fit IGNORING the gate
     trace = {}
     for K in range(1, Kmax + 1):
@@ -251,18 +252,28 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
                     alpha=al, beta=be, N=Asum if Asum > 0 else total, bic=bic)
         if raw_best is None or bic < raw_best["bic"]:
             raw_best = cand                # what BIC would pick with no gate
-        # resolution/separation gate: an m>=2 fit is eligible only if its
-        # components are genuinely resolved; an unresolved shoulder is a
-        # shape-correction that samples badly, so it is skipped (demoting to
-        # the best resolved lower-K fit -- ultimately the single gamma).
-        if not _resolved(x, cand["w"], cand["alpha"], cand["beta"]):
-            continue
-        if best is None or bic < best["bic"]:
-            best = cand
+        # gate conditions as independent flags. valley-ON keeps only fully
+        # resolved m>=2; valley-OFF drops the dip test so shoulders/flat merges
+        # survive as m>=2. BOTH selections are aggregated so the valley cut is a
+        # runtime toggle (no rebuild needed to switch).
+        if K == 1:
+            wf = sf = vf = False
+        else:
+            wf, sf, vf = _gate_flags(x, cand["w"], cand["alpha"], cand["beta"])
+        if not (wf or sf or vf):                      # valley-ON (full gate)
+            if best is None or bic < best["bic"]:
+                best = cand
+        if not (wf or sf):                            # valley-OFF (ignore the dip)
+            if best_nov is None or bic < best_nov["bic"]:
+                best_nov = cand
     if best is None:                       # every fit failed -> 1 broad gamma
         best = dict(m=1, w=np.array([1.0]), alpha=np.array([4.0]),
                     beta=np.array([4.0 / max(_trapz(x * y, x) / max(total, 1e-9), 1.0)]),
                     N=total, bic=np.inf)
+    if best_nov is None:
+        best_nov = best
+    best["novalley"] = dict(m=best_nov["m"], w=best_nov["w"],
+                            alpha=best_nov["alpha"], beta=best_nov["beta"])
     # gate bookkeeping: did BIC want m>=2, and if so which cut FIRST rejects it,
     # in the cascade order significance(weight) -> resolution(sep) -> valley?
     gate = dict(wanted=False, m=0, stage="", demoted=False)
@@ -347,7 +358,9 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                 else:
                     fits = [fit_profile(x, y, Kmax, penalty) for y in valid]
                 counts = np.zeros(Kmax, dtype=int)
+                counts_nov = np.zeros(Kmax, dtype=int)
                 Z = {m: [] for m in range(1, Kmax + 1)}
+                Z_nov = {m: [] for m in range(1, Kmax + 1)}
                 Ns = []
                 gs = gate_stats.setdefault(float(E), dict(
                     n_wanted=0, rej_weight=0, rej_sep=0, rej_valley=0))
@@ -356,6 +369,10 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                     counts[m - 1] += 1
                     Z[m].append(_to_z(fit["w"], fit["alpha"], fit["beta"]))
                     Ns.append(fit["N"])
+                    nv = fit.get("novalley")               # valley-OFF selection
+                    if nv is not None:
+                        counts_nov[nv["m"] - 1] += 1
+                        Z_nov[nv["m"]].append(_to_z(nv["w"], nv["alpha"], nv["beta"]))
                     g = fit.get("gate")
                     if g and g["wanted"]:                       # BIC wanted m>=2 here
                         gs["n_wanted"] += 1
@@ -367,6 +384,7 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                         elif st == "valley":
                             gs["rej_valley"] += 1
                 tot = counts.sum()
+                tot_nov = counts_nov.sum()
                 # Yield stats come from the FITTED amplitudes (sum of A_i). These are
                 # the units the sampler rebuilds in (N * unit-area kernels -> a bin sum
                 # of N/binwidth), so N_mean must be in these units, NOT raw G4 N_total.
@@ -376,6 +394,8 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                 dists[pid][E] = dict(
                     p_m=counts / max(tot, 1),
                     Z={m: np.array(v) for m, v in Z.items() if len(v) > 0},
+                    p_m_nov=counts_nov / max(tot_nov, 1),         # valley-OFF variant
+                    Z_nov={m: np.array(v) for m, v in Z_nov.items() if len(v) > 0},
                     N_mean=float(np.median(Ns)) if Ns else 0.0,   # median: robust central yield
                     N_logsigma=float(np.std(logN)),               # event-to-event yield spread
                     z_centers=x,
@@ -440,41 +460,49 @@ class ShowerParamInterpolator:
             Es = sorted(edata.keys())
             logE = np.log10(Es)
             zc = edata[Es[0]]["z_centers"]
-            # p(m) vs logE
-            pm_curves = [_make_1d(logE, [edata[E]["p_m"][k] for E in Es])
-                         for k in range(Kmax)]
-            # log N vs logE  (+ its spread, for yield fluctuation)
             logN = _make_1d(logE, [np.log(max(edata[E]["N_mean"], 1e-9)) for E in Es])
             logNsig = _make_1d(logE, [edata[E].get("N_logsigma", 0.0) for E in Es])
-            # per-m mean & cov of transformed vector
-            m_models = {}
-            for m in range(1, Kmax + 1):
-                dim = 2 if m == 1 else 3 * m - 1
-                Es_m, means, covs = [], [], []
-                for E in Es:
-                    Z = edata[E]["Z"].get(m)
-                    if Z is None or len(Z) < 2:
-                        continue
-                    Es_m.append(E)
-                    means.append(Z.mean(axis=0))
-                    if len(Z) >= MIN_SAMPLES_FOR_COV:
-                        covs.append(np.cov(Z, rowvar=False).reshape(dim, dim))
-                    else:                          # too few: diagonal from spread
-                        covs.append(np.diag(np.var(Z, axis=0) + 1e-6))
-                if not Es_m:
-                    continue
-                lE = np.log10(Es_m)
-                mean_sp = [_make_1d(lE, [mu[i] for mu in means]) for i in range(dim)]
-                cov_sp = [[_make_1d(lE, [C[i, j] for C in covs]) for j in range(dim)]
-                          for i in range(dim)]
-                m_models[m] = dict(dim=dim, mean_sp=mean_sp, cov_sp=cov_sp,
-                                   logE_range=(lE.min(), lE.max()))
-            self.pid_models[pid] = dict(pm=pm_curves, logN=logN, logNsig=logNsig,
-                                        m_models=m_models, z_centers=zc,
-                                        logE_range=(logE.min(), logE.max()))
+            # valley-ON (default) and valley-OFF variants of p(m) + per-m mean/cov
+            pm, mm = self._build_variant(edata, Es, logE, "p_m", "Z")
+            if any("Z_nov" in edata[E] for E in Es):
+                pm_nov, mm_nov = self._build_variant(edata, Es, logE, "p_m_nov", "Z_nov")
+            else:                                   # old model: no toggle available
+                pm_nov, mm_nov = pm, mm
+            self.pid_models[pid] = dict(pm=pm, m_models=mm, pm_nov=pm_nov,
+                                        m_models_nov=mm_nov, logN=logN, logNsig=logNsig,
+                                        z_centers=zc, logE_range=(logE.min(), logE.max()))
 
-    def p_m(self, pid, E):
-        cur = self.pid_models[pid]["pm"]
+    def _build_variant(self, edata, Es, logE, pm_key, z_key):
+        """Build (p(m) curves, per-m mean/cov splines) for one gate variant."""
+        pm_curves = [_make_1d(logE, [edata[E][pm_key][k] for E in Es])
+                     for k in range(self.Kmax)]
+        m_models = {}
+        for m in range(1, self.Kmax + 1):
+            dim = 2 if m == 1 else 3 * m - 1
+            Es_m, means, covs = [], [], []
+            for E in Es:
+                Z = edata[E][z_key].get(m)
+                if Z is None or len(Z) < 2:
+                    continue
+                Es_m.append(E)
+                means.append(Z.mean(axis=0))
+                if len(Z) >= MIN_SAMPLES_FOR_COV:
+                    covs.append(np.cov(Z, rowvar=False).reshape(dim, dim))
+                else:                              # too few: diagonal from spread
+                    covs.append(np.diag(np.var(Z, axis=0) + 1e-6))
+            if not Es_m:
+                continue
+            lE = np.log10(Es_m)
+            mean_sp = [_make_1d(lE, [mu[i] for mu in means]) for i in range(dim)]
+            cov_sp = [[_make_1d(lE, [C[i, j] for C in covs]) for j in range(dim)]
+                      for i in range(dim)]
+            m_models[m] = dict(dim=dim, mean_sp=mean_sp, cov_sp=cov_sp,
+                               logE_range=(lE.min(), lE.max()))
+        return pm_curves, m_models
+
+    def p_m(self, pid, E, nov=False):
+        pm = self.pid_models[pid]
+        cur = pm.get("pm_nov" if nov else "pm", pm["pm"])
         p = np.array([float(np.clip(c(np.log10(E)), 0, None)) for c in cur])
         s = p.sum()
         return p / s if s > 0 else np.ones(self.Kmax) / self.Kmax
@@ -486,8 +514,9 @@ class ShowerParamInterpolator:
         sp = self.pid_models[pid].get("logNsig")
         return float(max(sp(np.log10(E)), 0.0)) if sp is not None else 0.0
 
-    def mean_cov(self, pid, E, m):
-        mm = self.pid_models[pid]["m_models"].get(m)
+    def mean_cov(self, pid, E, m, nov=False):
+        pm = self.pid_models[pid]
+        mm = pm.get("m_models_nov" if nov else "m_models", pm["m_models"]).get(m)
         if mm is None:
             return None
         lq = np.log10(E); dim = mm["dim"]
@@ -508,18 +537,20 @@ class ShowerParamInterpolator:
 #  MODULE C : sampler
 # ===========================================================================
 class ShowerSampler:
-    def __init__(self, interp, Kmax=KMAX_DEFAULT):
+    def __init__(self, interp, Kmax=KMAX_DEFAULT, no_valley=False):
         self.interp = interp
         self.Kmax = Kmax
+        self.no_valley = no_valley          # True -> sample the valley-OFF variant
 
     def sample_params(self, pid, E, rng):
-        pm = self.interp.p_m(pid, E)
+        nov = self.no_valley
+        pm = self.interp.p_m(pid, E, nov)
         # only sample m that actually have a fitted (mean,cov)
         avail = [m for m in range(1, self.Kmax + 1)
-                 if self.interp.mean_cov(pid, E, m) is not None]
+                 if self.interp.mean_cov(pid, E, m, nov) is not None]
         p = np.array([pm[m - 1] for m in avail]); p = p / p.sum()
         m = int(rng.choice(avail, p=p))
-        mean, cov = self.interp.mean_cov(pid, E, m)
+        mean, cov = self.interp.mean_cov(pid, E, m, nov)
         z = rng.multivariate_normal(mean, cov)
         sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
         z = np.clip(z, mean - 2.5 * sd, mean + 2.5 * sd)   # truncate fat Gaussian tails

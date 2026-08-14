@@ -143,7 +143,8 @@ def _plot(rows, name, outdir, sigma_cm, suffix=""):
     ax1.set_yscale("log")
     ax1.set_ylabel(r"$L_2$ ($\sum(\mathrm{data}-\mathrm{model})^2/\sum\mathrm{data}^2$)",
                    fontsize=13)
-    tnote = "" if sigma_cm > 0 else "  [unblurred G4]"
+    tnote = ("" if sigma_cm > 0 else "  [unblurred G4]") + \
+            ("  [no valley cut]" if "novalley" in suffix else "")
     ax1.set_title(f"Sampled Model Shower vs Geant4 Shower ({sp}){tnote}\n",
                   fontsize=15, fontweight="bold", pad=10)
     ax1.legend(fontsize=11, framealpha=0.92, loc="best")
@@ -259,6 +260,10 @@ def main():
                     help="gate-demotion stats CSV from the model build "
                          "(default: <g4-dir>/shower_model_gate_stats.csv); "
                          "used for sampled_vs_g4_gamma_loss.png")
+    ap.add_argument("--no-valley-cut", action="store_true",
+                    help="sample the Gamma Mixture Model WITHOUT the valley (local-"
+                         "minima) cut, keeping shoulders/flat merges as m>=2. Needs a "
+                         "model built with the both-variants build. Writes *_novalley.*")
     ap.add_argument("--outdir",
                     default="/n/home13/jchowdhury/SIREN/geant4_shower/output/plots/result")
     args = ap.parse_args()
@@ -266,10 +271,10 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     model_path = args.model or os.path.join(args.g4_dir, "shower_model.pkl")
     sigma_cm = 0.0 if args.no_blur else args.depth_res_cm
-    suffix = "_noblur" if args.no_blur else ""
+    suffix = ("_noblur" if args.no_blur else "") + ("_novalley" if args.no_valley_cut else "")
 
     interp = load_model(model_path)
-    sampler = ShowerSampler(interp)
+    sampler = ShowerSampler(interp, no_valley=args.no_valley_cut)
     library = load_g4_library(args.g4_dir)
 
     for sp in [s.strip() for s in args.species.split(",") if s.strip()]:
