@@ -61,13 +61,30 @@ PID_TO_NAME = {pid: name for pid, name in SPECIES}
 
 KMAX_DEFAULT = 3
 MIN_SAMPLES_FOR_COV = 12   # min runs at an (m, E) to estimate a covariance
-BIC_RES_CM = 45.0          # detector depth resolution: bins finer than this are
-                           # correlated, so BIC counts resolution elements, not bins
-GATE_VALLEY_FRAC = 0.05    # m>=2 kept only if the dip between adjacent peaks is at
-                           # least this fraction below the lower peak (else it is a
-                           # broadened shoulder, not a resolved second cascade)
-GATE_MIN_WEIGHT = 0.10     # ...and the smaller component must be >=10% of the BIGGER
-                           # one (ratio min(w)/max(w)); set 0.05 for a 5% threshold
+BIC_RES_CM = 45.0          # detector depth resolution: used only to set the honest
+                           # BIC sample count (resolvable elements, not raw bins)
+GATE_MIN_WEIGHT = 0.20     # veto m=2 unless the smaller component is >=20% of the
+                           # bigger one (ratio min(w)/max(w))
+
+# --- peak-resolution length L_char(E): how far apart two sub-cascade peaks must
+#     be before they show up as a resolved second bump (from pion_showers_ice.ipynb).
+#     L_char = LAMBDA_LCHAR * sigma_z(E), sigma_z = EM-cascade RMS longitudinal width.
+#     Set LAMBDA_LCHAR to the LOWEST value read off the L_char[sigma_z]-vs-E plot.
+X0_ICE_CM    = 39.31       # radiation length in ice [cm]
+EC_GEV       = 0.0786      # critical energy in ice [GeV]
+B_SHOWER     = 0.5         # EM longitudinal shape (rate) parameter
+LAMBDA_LCHAR = 1.6         # L_char / sigma_z  (lowest onset from the notebook plot)
+
+
+def _sigma_z_cm(E_GeV):
+    """EM sub-cascade longitudinal RMS width [cm] (Longo, photon-initiated)."""
+    a = 1.0 + B_SHOWER * (np.log(np.asarray(E_GeV, float) / EC_GEV) + 0.5)
+    return (np.sqrt(a) / B_SHOWER) * X0_ICE_CM
+
+
+def L_char_cm(E_GeV):
+    """Peak-resolution length in ice [cm] at (sub-cascade) energy E [GeV]."""
+    return LAMBDA_LCHAR * _sigma_z_cm(E_GeV)
 
 
 # ===========================================================================
@@ -151,87 +168,46 @@ def _initial_guess(x, y, K, smooth=5):
     return p0, (lo, hi)
 
 
-def _resolved(x, w, alpha, beta, res_cm=BIC_RES_CM,
-              valley_frac=GATE_VALLEY_FRAC, min_w=GATE_MIN_WEIGHT):
-    """Gate for accepting an m>=2 fit: the components must form a genuinely
-    RESOLVED multi-peak profile, not one hump built from overlapping pieces
-    (which fits well but samples badly). Require:
-      (a) the smaller component is >= min_w of the bigger (ratio min(w)/max(w)),
-      (b) adjacent component modes (peaks) are >= res_cm apart,
-      (c) the summed curve dips >= valley_frac below the lower of the two peaks
-          somewhere between them (a real valley, not a shoulder).
-    A broadened shoulder (no real dip between the component peaks) fails and is
-    demoted. Keying off the component modes (not find_peaks of the summed curve)
-    avoids the edge blind spot for deep peaks and the overlap bias. m==1 passes."""
-    m = len(w)
-    if m == 1:
-        return True
+def _veto_m2(w, alpha, beta, E, min_w=GATE_MIN_WEIGHT):
+    """Veto an m>=2 fit unless it is a genuinely resolved multi-peak profile:
+      (a) the smaller component is >= min_w of the bigger (ratio min(w)/max(w)), and
+      (b) adjacent component peaks (modes) are at least L_char(E) apart.
+    Returns (vetoed, reason) with reason in {'weight','separation',''}.
+    m==1 is never vetoed. (The old 5% valley test is dropped: L_char, being the
+    shoulder/dip onset separation, already encodes 'is a 2nd bump resolvable?'.)"""
     w = np.asarray(w, float); alpha = np.asarray(alpha, float); beta = np.asarray(beta, float)
-    if np.min(w) / np.max(w) < min_w:                        # (a) smaller vs bigger weight
-        return False
-    modes = np.maximum(alpha - 1.0, 1e-6) / beta             # per-component peak depth
-    o = np.argsort(modes)                                    # sort by position
-    modes, alpha, beta, w = modes[o], alpha[o], beta[o], w[o]
-    f = np.sum([w[i] * _kernel(x, alpha[i], beta[i]) for i in range(m)], axis=0)
-    idx = np.clip(np.searchsorted(x, modes), 0, len(x) - 1)  # nearest bin to each mode
-    for j in range(m - 1):
-        if (modes[j + 1] - modes[j]) < res_cm:              # (b) peaks resolved?
-            return False
-        a, b = int(idx[j]), int(idx[j + 1])
-        if b <= a:
-            return False
-        valley = float(f[a:b + 1].min())                    # dip between the two modes
-        if valley > (1.0 - valley_frac) * min(f[a], f[b]):  # (c) a real valley?
-            return False
-    return True
-
-
-def _gate_flags(x, w, alpha, beta, res_cm=BIC_RES_CM,
-                valley_frac=GATE_VALLEY_FRAC, min_w=GATE_MIN_WEIGHT):
-    """Diagnostic companion to _resolved: which gate conditions an m>=2 fit
-    FAILS, evaluated independently (a fit may fail more than one). Returns
-    (weight_fail, sep_fail, valley_fail).  demoted == any of the three."""
-    w = np.asarray(w, float); alpha = np.asarray(alpha, float); beta = np.asarray(beta, float)
-    weight_fail = bool(np.min(w) / np.max(w) < min_w)        # smaller < min_w of bigger
-    modes = np.maximum(alpha - 1.0, 1e-6) / beta
-    o = np.argsort(modes)
-    modes, alpha, beta, w = modes[o], alpha[o], beta[o], w[o]
-    f = np.sum([w[i] * _kernel(x, alpha[i], beta[i]) for i in range(len(w))], axis=0)
-    idx = np.clip(np.searchsorted(x, modes), 0, len(x) - 1)
-    sep_fail = valley_fail = False
-    for j in range(len(w) - 1):
-        if (modes[j + 1] - modes[j]) < res_cm:
-            sep_fail = True
-        a, b = int(idx[j]), int(idx[j + 1])
-        if b > a:
-            valley = float(f[a:b + 1].min())
-            if valley > (1.0 - valley_frac) * min(f[a], f[b]):
-                valley_fail = True
-        else:
-            valley_fail = True
-    return weight_fail, sep_fail, valley_fail
+    if len(w) == 1:
+        return False, ""
+    if np.min(w) / np.max(w) < min_w:                      # (a) significance
+        return True, "weight"
+    modes = np.sort(np.maximum(alpha - 1.0, 1e-6) / beta)  # peak depths [cm]
+    if float(np.min(np.diff(modes))) < L_char_cm(E):      # (b) resolvable separation
+        return True, "separation"
+    return False, ""
 
 
 def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
     """
     Fit y(x) as sums of 1..Kmax gammas; pick K by BIC.
-    `penalty` (lambda) multiplies the BIC complexity term: >1 favours fewer
-    gammas (extra components must earn a bigger residual drop to be selected).
-    An m>=2 fit is additionally kept only if it passes _resolved() (peaks a
-    detector-resolution apart, a real valley between them, each weight >=10%);
-    otherwise it is demoted to the best resolved / single-gamma fit.
-    Returns dict with m, w (fractional, sums to 1), alpha, beta, N (total yield),
-    and the BIC/rss trace.
+    `penalty` (lambda) multiplies the BIC complexity term: >1 favours fewer gammas.
+
+    Returns the BIC-preferred fit at the top level (keys m, w, alpha, beta, N, bic)
+    for backward compatibility, PLUS:
+      'm1'   : the 1-gamma fit  dict(w, alpha, beta, N)          (always present)
+      'm2'   : the 2-gamma fit  dict(w, alpha, beta, N) or None
+      'bic_m': the BIC-preferred number of gammas (int)
+      'bic_trace'.
+    The m=2 veto (weight ratio + peak separation vs L_char(E)) is NOT applied here
+    -- it is decided at aggregation time so it stays tunable; both fits are kept.
     """
     n = len(x)
     dx = float(np.median(np.diff(x))) if n > 1 else 1.0
-    # honest sample count: neighbouring bins within the detector resolution are
-    # correlated, so score by resolvable elements (span / res), not raw bins.
+    # honest sample count: bins within the detector resolution are correlated,
+    # so score by resolvable elements (span / res), not raw bins.
     n_eff = max(n * dx / BIC_RES_CM, 3.0)
     total = _trapz(y, x)
-    best = None
-    best_nov = None                        # valley-OFF selection (dip test disabled)
-    raw_best = None                        # lowest-BIC fit IGNORING the gate
+    cands = {}                             # K -> candidate fit dict
+    raw_best = None                        # lowest-BIC fit
     trace = {}
     for K in range(1, Kmax + 1):
         try:
@@ -240,49 +216,29 @@ def fit_profile(x, y, Kmax=KMAX_DEFAULT, penalty=1.0):
         except Exception:
             trace[K] = np.inf
             continue
-        resid = y - _mixture(x, *popt)
-        rss = float(np.sum(resid ** 2))
-        k = 3 * K
-        bic = n_eff * np.log(max(rss, 1e-30) / n) + penalty * k * np.log(n_eff)
+        rss = float(np.sum((y - _mixture(x, *popt)) ** 2))
+        bic = n_eff * np.log(max(rss, 1e-30) / n) + penalty * 3 * K * np.log(n_eff)
         trace[K] = bic
         A = np.array(popt[0::3]); al = np.array(popt[1::3]); be = np.array(popt[2::3])
         A, al, be = _sort_components(A, al, be)
         Asum = A.sum()
         cand = dict(m=K, w=A / Asum if Asum > 0 else np.ones(K) / K,
                     alpha=al, beta=be, N=Asum if Asum > 0 else total, bic=bic)
+        cands[K] = cand
         if raw_best is None or bic < raw_best["bic"]:
-            raw_best = cand                # what BIC would pick with no gate
-        # gate conditions as independent flags. valley-ON keeps only fully
-        # resolved m>=2; valley-OFF drops the dip test so shoulders/flat merges
-        # survive as m>=2. BOTH selections are aggregated so the valley cut is a
-        # runtime toggle (no rebuild needed to switch).
-        if K == 1:
-            wf = sf = vf = False
-        else:
-            wf, sf, vf = _gate_flags(x, cand["w"], cand["alpha"], cand["beta"])
-        if not (wf or sf or vf):                      # valley-ON (full gate)
-            if best is None or bic < best["bic"]:
-                best = cand
-        if not (wf or sf):                            # valley-OFF (ignore the dip)
-            if best_nov is None or bic < best_nov["bic"]:
-                best_nov = cand
-    if best is None:                       # every fit failed -> 1 broad gamma
-        best = dict(m=1, w=np.array([1.0]), alpha=np.array([4.0]),
-                    beta=np.array([4.0 / max(_trapz(x * y, x) / max(total, 1e-9), 1.0)]),
-                    N=total, bic=np.inf)
-    if best_nov is None:
-        best_nov = best
-    best["novalley"] = dict(m=best_nov["m"], w=best_nov["w"],
-                            alpha=best_nov["alpha"], beta=best_nov["beta"])
-    # gate bookkeeping: did BIC want m>=2, and if so which cut FIRST rejects it,
-    # in the cascade order significance(weight) -> resolution(sep) -> valley?
-    gate = dict(wanted=False, m=0, stage="", demoted=False)
-    if raw_best is not None and raw_best["m"] >= 2:
-        wf, sf, vf = _gate_flags(x, raw_best["w"], raw_best["alpha"], raw_best["beta"])
-        stage = "weight" if wf else "sep" if sf else "valley" if vf else "kept"
-        gate = dict(wanted=True, m=int(raw_best["m"]), stage=stage,
-                    demoted=(stage != "kept"))
-    best["gate"] = gate
+            raw_best = cand
+    # the explicit 1- and 2-gamma fits (m1 has a broad-gamma fallback)
+    m1 = cands.get(1) or dict(m=1, w=np.array([1.0]), alpha=np.array([4.0]),
+                              beta=np.array([4.0 / max(_trapz(x * y, x) / max(total, 1e-9), 1.0)]),
+                              N=total, bic=np.inf)
+    m2 = cands.get(2)
+    if raw_best is None:
+        raw_best = m1
+    best = dict(raw_best)                  # BIC-preferred fit (backward compatible)
+    best["m1"] = dict(w=m1["w"], alpha=m1["alpha"], beta=m1["beta"], N=m1["N"])
+    best["m2"] = (None if m2 is None else
+                  dict(w=m2["w"], alpha=m2["alpha"], beta=m2["beta"], N=m2["N"]))
+    best["bic_m"] = int(raw_best["m"])
     best["bic_trace"] = trace
     return best
 
@@ -357,34 +313,32 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                     fits = pool.starmap(fit_profile, [(x, y, Kmax, penalty) for y in valid])
                 else:
                     fits = [fit_profile(x, y, Kmax, penalty) for y in valid]
-                counts = np.zeros(Kmax, dtype=int)
-                counts_nov = np.zeros(Kmax, dtype=int)
+                counts = np.zeros(Kmax, dtype=int)      # counts of GENUINE m (1 or 2)
                 Z = {m: [] for m in range(1, Kmax + 1)}
-                Z_nov = {m: [] for m in range(1, Kmax + 1)}
                 Ns = []
                 gs = gate_stats.setdefault(float(E), dict(
-                    n_wanted=0, rej_weight=0, rej_sep=0, rej_valley=0))
+                    n_wanted=0, rej_weight=0, rej_sep=0, kept=0))
                 for fit in fits:
-                    m = fit["m"]
-                    counts[m - 1] += 1
-                    Z[m].append(_to_z(fit["w"], fit["alpha"], fit["beta"]))
-                    Ns.append(fit["N"])
-                    nv = fit.get("novalley")               # valley-OFF selection
-                    if nv is not None:
-                        counts_nov[nv["m"] - 1] += 1
-                        Z_nov[nv["m"]].append(_to_z(nv["w"], nv["alpha"], nv["beta"]))
-                    g = fit.get("gate")
-                    if g and g["wanted"]:                       # BIC wanted m>=2 here
+                    m1, m2, bic_m = fit["m1"], fit["m2"], fit["bic_m"]
+                    genuine2, reason = False, ""
+                    if bic_m >= 2 and m2 is not None:          # BIC wants a 2nd gamma...
                         gs["n_wanted"] += 1
-                        st = g["stage"]                         # first cut to reject it
-                        if st == "weight":
-                            gs["rej_weight"] += 1
-                        elif st == "sep":
-                            gs["rej_sep"] += 1
-                        elif st == "valley":
-                            gs["rej_valley"] += 1
+                        vetoed, reason = _veto_m2(m2["w"], m2["alpha"], m2["beta"], E)
+                        genuine2 = not vetoed                  # ...kept only if resolved
+                        if reason == "weight":       gs["rej_weight"] += 1
+                        elif reason == "separation": gs["rej_sep"] += 1
+                        else:                        gs["kept"] += 1
+                    # route to the pool of its GENUINE m; a vetoed m=2 contributes its
+                    # own m=1 fit (not discarded) so the m=1 pool stays unbiased.
+                    if genuine2:
+                        counts[1] += 1
+                        Z[2].append(_to_z(m2["w"], m2["alpha"], m2["beta"]))
+                        Ns.append(m2["N"])
+                    else:
+                        counts[0] += 1
+                        Z[1].append(_to_z(m1["w"], m1["alpha"], m1["beta"]))
+                        Ns.append(m1["N"])
                 tot = counts.sum()
-                tot_nov = counts_nov.sum()
                 # Yield stats come from the FITTED amplitudes (sum of A_i). These are
                 # the units the sampler rebuilds in (N * unit-area kernels -> a bin sum
                 # of N/binwidth), so N_mean must be in these units, NOT raw G4 N_total.
@@ -394,8 +348,6 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                 dists[pid][E] = dict(
                     p_m=counts / max(tot, 1),
                     Z={m: np.array(v) for m, v in Z.items() if len(v) > 0},
-                    p_m_nov=counts_nov / max(tot_nov, 1),         # valley-OFF variant
-                    Z_nov={m: np.array(v) for m, v in Z_nov.items() if len(v) > 0},
                     N_mean=float(np.median(Ns)) if Ns else 0.0,   # median: robust central yield
                     N_logsigma=float(np.std(logN)),               # event-to-event yield spread
                     z_centers=x,
@@ -403,7 +355,8 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                 if verbose:
                     pm = np.round(dists[pid][E]["p_m"], 3)
                     print(f"  {PID_TO_NAME.get(pid,pid):4s} E={E:8.0f} GeV  "
-                          f"n={tot:4d}  p(m)={pm}  <N>={dists[pid][E]['N_mean']:.3g}")
+                          f"n={tot:4d}  p(m)={pm}  <N>={dists[pid][E]['N_mean']:.3g}  "
+                          f"L_char={L_char_cm(E):.0f}cm")
     finally:
         if pool is not None:
             pool.close(); pool.join()
@@ -414,15 +367,14 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
             os.makedirs(d, exist_ok=True)
         with open(gate_csv, "w", newline="") as fcsv:
             wr = _csv.writer(fcsv)
-            # rej_* are MUTUALLY EXCLUSIVE (first cut to reject, cascade order
-            # weight -> sep -> valley); survivors = n_wanted - sum(rej_*).
-            wr.writerow(["E", "n_wanted", "rej_weight", "rej_sep", "rej_valley"])
+            # of the fits where BIC wanted m=2 (n_wanted): how many vetoed by the
+            # weight cut vs the L_char separation cut, and how many kept (genuine m=2).
+            wr.writerow(["E", "n_wanted", "rej_weight", "rej_sep", "kept"])
             for E in sorted(gate_stats):
                 g = gate_stats[E]
-                wr.writerow([E, g["n_wanted"], g["rej_weight"],
-                             g["rej_sep"], g["rej_valley"]])
+                wr.writerow([E, g["n_wanted"], g["rej_weight"], g["rej_sep"], g["kept"]])
         if verbose:
-            print(f"  wrote gate-demotion stats -> {gate_csv}")
+            print(f"  wrote m=2 veto stats -> {gate_csv}")
     return dists
 
 

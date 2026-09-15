@@ -163,17 +163,17 @@ def _plot(rows, name, outdir, sigma_cm, suffix=""):
     print(f"  wrote {out}")
 
 
-# cut labels + styles for the gamma-loss plots (cascade order: sig -> res -> valley)
+# cut labels + styles for the gamma-loss plot (the two m=2 veto cuts, + their total)
 _CUT_STYLE = [
-    ("Weaker Component Insignificant",             "#8E44AD", "-s", 9),
-    ("Peaks Unresolved in Detector",               "#E67E22", "-o", 10),
-    ("No Local Minima between the Resolved Peaks", "#27AE60", "-D", 8),
+    ("Weaker component < 20%",     "#8E44AD", "-s", 9),
+    ("Peaks closer than L_char",   "#E67E22", "-o", 10),
+    ("Total vetoed",               "#2C3E50", "-^", 9),
 ]
 
 
 def _read_gate_csv(csv_path):
-    """Return (E, n_wanted, rej_weight, rej_sep, rej_valley) arrays, or None.
-    rej_* are mutually-exclusive first-cut-to-reject counts (cascade order)."""
+    """Return (E, n_wanted, rej_weight, rej_sep, kept) arrays, or None.
+    rej_weight + rej_sep + kept == n_wanted (mutually exclusive; weight cut first)."""
     import csv as _csv
     if not os.path.exists(csv_path):
         print(f"  gamma-loss: no gate CSV at {csv_path} "
@@ -185,7 +185,7 @@ def _read_gate_csv(csv_path):
             nw = float(r["n_wanted"])
             if nw > 0:
                 rows.append((float(r["E"]), nw, float(r["rej_weight"]),
-                             float(r["rej_sep"]), float(r["rej_valley"])))
+                             float(r["rej_sep"]), float(r["kept"])))
     if not rows:
         print("  gamma-loss: gate CSV has no m>=2 cases to plot"); return None
     rows.sort()
@@ -193,7 +193,16 @@ def _read_gate_csv(csv_path):
     return a[:, 0], a[:, 1], a[:, 2], a[:, 3], a[:, 4]
 
 
-def _gamma_loss_fig(E, curves, title, outpath):
+def _plot_gamma_loss(csv_path, outdir):
+    """Of the fits where BIC wanted m=2, what fraction the veto removes vs energy
+    (all species): the weight cut, the L_char separation cut, and their total.
+    The two cuts are mutually exclusive, so weight + separation = total."""
+    got = _read_gate_csv(csv_path)
+    if got is None:
+        return
+    E, nw, rw, rs, kept = got
+    curves = [100.0 * rw / nw, 100.0 * rs / nw, 100.0 * (rw + rs) / nw]
+
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -203,43 +212,16 @@ def _gamma_loss_fig(E, curves, title, outpath):
                 markeredgewidth=1.4, alpha=0.9, label=label)
     ax.set_xscale("log")
     ax.set_xlabel("Shower Energy [GeV]", fontsize=15)
-    ax.set_ylabel("% of BIC m$\\geq$2 fits demoted", fontsize=14)
-    ax.set_title(title, fontsize=14, fontweight="bold", pad=10)
+    ax.set_ylabel(r"% of BIC $m\geq2$ fits vetoed", fontsize=14)
+    ax.set_title("Gamma-mixture m=2 vetoes (all species)\n", fontsize=14,
+                 fontweight="bold", pad=10)
     ax.grid(True, which="major", ls=":", lw=0.9, color="#bbbbbb", alpha=0.7)
     ax.tick_params(axis="both", which="major", labelsize=12, length=6)
     ax.legend(fontsize=10.5, framealpha=0.92, loc="best")
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=150); plt.close(fig)
-    print(f"  wrote {outpath}")
-
-
-def _plot_gamma_loss(csv_path, outdir):
-    """Two views of how the gate removes BIC m>=2 fits (all species; cascade
-    order significance -> resolution -> valley):
-      cumulative : % of ALL m>=2 removed after applying the cuts up to each stage
-                   (curve 3 = total demoted).
-      sequential : each cut's rejection rate among the fits that SURVIVED the
-                   earlier cuts (valley is then over resolved, significant pairs).
-    """
-    got = _read_gate_csv(csv_path)
-    if got is None:
-        return
-    E, nw, rw, rs, rv = got
     os.makedirs(outdir, exist_ok=True)
-
-    # cumulative: denominator always the full m>=2 population
-    _gamma_loss_fig(
-        E, [100.0 * rw / nw, 100.0 * (rw + rs) / nw, 100.0 * (rw + rs + rv) / nw],
-        "Gamma-mixture demotions - cumulative (all species)\n",
-        os.path.join(outdir, "sampled_vs_g4_gamma_loss_cumulative.png"))
-
-    # sequential: each cut over the survivors of the previous cuts
-    surv1 = np.maximum(nw - rw, 1e-9)
-    surv2 = np.maximum(surv1 - rs, 1e-9)
-    _gamma_loss_fig(
-        E, [100.0 * rw / nw, 100.0 * rs / surv1, 100.0 * rv / surv2],
-        "Gamma-mixture demotions - sequential, each cut on survivors (all species)\n",
-        os.path.join(outdir, "sampled_vs_g4_gamma_loss_sequential.png"))
+    out = os.path.join(outdir, "sampled_vs_g4_gamma_loss.png")
+    fig.tight_layout(); fig.savefig(out, dpi=150); plt.close(fig)
+    print(f"  wrote {out}")
 
 
 def main():
