@@ -67,24 +67,22 @@ GATE_MIN_WEIGHT = 0.20     # veto m=2 unless the smaller component is >=20% of t
                            # bigger one (ratio min(w)/max(w))
 
 # --- peak-resolution length L_char(E): how far apart two sub-cascade peaks must
-#     be before they show up as a resolved second bump (from pion_showers_ice.ipynb).
-#     L_char = LAMBDA_LCHAR * sigma_z(E), sigma_z = EM-cascade RMS longitudinal width.
-#     Set LAMBDA_LCHAR to the LOWEST value read off the L_char[sigma_z]-vs-E plot.
-X0_ICE_CM    = 39.31       # radiation length in ice [cm]
-EC_GEV       = 0.0786      # critical energy in ice [GeV]
-B_SHOWER     = 0.5         # EM longitudinal shape (rate) parameter
-LAMBDA_LCHAR = 1.6         # L_char / sigma_z  (lowest onset from the notebook plot)
-
-
-def _sigma_z_cm(E_GeV):
-    """EM sub-cascade longitudinal RMS width [cm] (Longo, photon-initiated)."""
-    a = 1.0 + B_SHOWER * (np.log(np.asarray(E_GeV, float) / EC_GEV) + 0.5)
-    return (np.sqrt(a) / B_SHOWER) * X0_ICE_CM
+#     be before they show up as a resolved second bump. Read directly off the
+#     LOWEST curve of the L_char[X0]-vs-E plot in pion_showers_ice.ipynb, then
+#     interpolated in log10(E) and converted to cm. It is species-independent
+#     (EM cascade + medium physics), so the same table applies to pi/K/p/n.
+#     Edit the two arrays to match your plot.
+X0_ICE_CM   = 39.31                                   # radiation length in ice [cm]
+_LCHAR_EGEV = np.array([1e1, 1e2, 1e3, 1e4, 1e5])     # energy [GeV]
+_LCHAR_X0   = np.array([5.0, 6.75, 8.0, 9.0, 10.0])   # lowest L_char [X0] read off the plot
 
 
 def L_char_cm(E_GeV):
-    """Peak-resolution length in ice [cm] at (sub-cascade) energy E [GeV]."""
-    return LAMBDA_LCHAR * _sigma_z_cm(E_GeV)
+    """Peak-resolution length in ice [cm] vs energy, from the notebook's
+    L_char[X0]-vs-E plot (interpolated in log10 E, clamped outside the range)."""
+    lx0 = np.interp(np.log10(np.asarray(E_GeV, float)),
+                    np.log10(_LCHAR_EGEV), _LCHAR_X0)
+    return lx0 * X0_ICE_CM
 
 
 # ===========================================================================
