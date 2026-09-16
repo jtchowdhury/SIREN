@@ -162,9 +162,13 @@ def method1_profile(x, g4_mean_profile, E):
 
 
 def method2_sample(interp, pid, E, x, rng):
-    """Sampled Single Gamma: (alpha,beta) from the m=1 distribution + yield draw.
-    Returns (profile, N) or None if there is no m=1 model at this energy."""
-    mc = interp.mean_cov(pid, E, 1)
+    """Sampled Single Gamma: (alpha,beta) from the all-m=1 distribution + yield draw.
+    Draws from the pool where EVERY shower is fit as one gamma (including the genuine
+    doubles), so this baseline can't cherry-pick the easy showers -- an honest single-
+    gamma model. Returns (profile, N) or None if there is no m=1 model at this energy."""
+    mc = interp.mean_cov_single_all(pid, E)
+    if mc is None:                                   # old pkl without the all-m=1 pool
+        mc = interp.mean_cov(pid, E, 1)
     if mc is None:
         return None
     mean, cov = mc

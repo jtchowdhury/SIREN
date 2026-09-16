@@ -317,6 +317,7 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                     fits = [fit_profile(x, y, Kmax, penalty) for y in valid]
                 counts = np.zeros(Kmax, dtype=int)      # counts of GENUINE m (1 or 2)
                 Z = {m: [] for m in range(1, Kmax + 1)}
+                Z1_all = []          # EVERY shower's m=1 fit -> honest single-gamma baseline
                 Ns = []
                 gs = gate_stats.setdefault(float(E), dict(
                     n_wanted=0, rej_weight=0, rej_sep=0, kept=0))
@@ -330,6 +331,11 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                         if reason == "weight":       gs["rej_weight"] += 1
                         elif reason == "separation": gs["rej_sep"] += 1
                         else:                        gs["kept"] += 1
+                    # Single-gamma baseline: keep the m=1 fit of EVERY shower (incl.
+                    # genuine doubles), so that pool is NOT allowed to skip the hard
+                    # showers. This is only used by compare_methods' "Sampled Single
+                    # Gamma"; the mixture keeps using the clean genuine-m=1 pool below.
+                    Z1_all.append(_to_z(m1["w"], m1["alpha"], m1["beta"]))
                     # route to the pool of its GENUINE m; a vetoed m=2 contributes its
                     # own m=1 fit (not discarded) so the m=1 pool stays unbiased.
                     if genuine2:
@@ -350,6 +356,7 @@ def build_distributions(library, Kmax=KMAX_DEFAULT, verbose=True, n_jobs=1, pena
                 dists[pid][E] = dict(
                     p_m=counts / max(tot, 1),
                     Z={m: np.array(v) for m, v in Z.items() if len(v) > 0},
+                    Z1_all=(np.array(Z1_all) if Z1_all else np.empty((0, 2))),
                     N_mean=float(np.median(Ns)) if Ns else 0.0,   # median: robust central yield
                     N_logsigma=float(np.std(logN)),               # event-to-event yield spread
                     z_centers=x,
@@ -422,9 +429,35 @@ class ShowerParamInterpolator:
                 pm_nov, mm_nov = self._build_variant(edata, Es, logE, "p_m_nov", "Z_nov")
             else:                                   # old model: no toggle available
                 pm_nov, mm_nov = pm, mm
+            m1_all = self._build_single_all(edata, Es)   # honest single-gamma baseline pool
             self.pid_models[pid] = dict(pm=pm, m_models=mm, pm_nov=pm_nov,
                                         m_models_nov=mm_nov, logN=logN, logNsig=logNsig,
+                                        m1_all=m1_all,
                                         z_centers=zc, logE_range=(logE.min(), logE.max()))
+
+    def _build_single_all(self, edata, Es):
+        """mean/cov spline for the 'fit EVERY shower as one gamma' pool (Z1_all).
+        Used only by the single-gamma baseline so it can't skip the genuine doubles."""
+        dim = 2
+        Es_m, means, covs = [], [], []
+        for E in Es:
+            Z = edata[E].get("Z1_all")
+            if Z is None or len(Z) < 2:
+                continue
+            Es_m.append(E)
+            means.append(Z.mean(axis=0))
+            if len(Z) >= MIN_SAMPLES_FOR_COV:
+                covs.append(np.cov(Z, rowvar=False).reshape(dim, dim))
+            else:                                  # too few: diagonal from spread
+                covs.append(np.diag(np.var(Z, axis=0) + 1e-6))
+        if not Es_m:
+            return None
+        lE = np.log10(Es_m)
+        mean_sp = [_make_1d(lE, [mu[i] for mu in means]) for i in range(dim)]
+        cov_sp = [[_make_1d(lE, [C[i, j] for C in covs]) for j in range(dim)]
+                  for i in range(dim)]
+        return dict(dim=dim, mean_sp=mean_sp, cov_sp=cov_sp,
+                    logE_range=(lE.min(), lE.max()))
 
     def _build_variant(self, edata, Es, logE, pm_key, z_key):
         """Build (p(m) curves, per-m mean/cov splines) for one gate variant."""
@@ -478,6 +511,23 @@ class ShowerParamInterpolator:
         cov = np.array([[mm["cov_sp"][i][j](lq) for j in range(dim)]
                         for i in range(dim)], float)
         cov = 0.5 * (cov + cov.T)                          # symmetrize
+        w, V = np.linalg.eigh(cov)                          # clip to PSD
+        w = np.clip(w, self.cov_ridge, None)
+        cov = (V * w) @ V.T
+        return mean, cov
+
+    def mean_cov_single_all(self, pid, E):
+        """(mean, cov) of the all-m=1 pool: every shower fit as ONE gamma, incl. the
+        genuine doubles. This is the honest single-gamma baseline. Returns None for
+        old models built before the Z1_all pool existed (caller should fall back)."""
+        mm = self.pid_models[pid].get("m1_all")
+        if mm is None:
+            return None
+        lq = np.log10(E); dim = mm["dim"]
+        mean = np.array([sp(lq) for sp in mm["mean_sp"]], float)
+        cov = np.array([[mm["cov_sp"][i][j](lq) for j in range(dim)]
+                        for i in range(dim)], float)
+        cov = 0.5 * (cov + cov.T)                           # symmetrize
         w, V = np.linalg.eigh(cov)                          # clip to PSD
         w = np.clip(w, self.cov_ridge, None)
         cov = (V * w) @ V.T
