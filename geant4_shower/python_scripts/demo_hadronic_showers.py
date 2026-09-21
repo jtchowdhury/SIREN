@@ -35,6 +35,16 @@ EXAMPLE_FINAL_STATE = [
     ("pim", 300.0), ("Kp", 250.0), ("n", 600.0), ("pi0", 150.0),
 ]
 
+names = { 
+    "pip" : r'$\pi^+$', 
+    "pim" : r'$\pi^-$', 
+    "pi0" : r'$\pi^0$', 
+    "Kp"  : r'$K^+$', 
+    "Km"  : r'$K^-$', 
+    "Ks"  : r'$K^0_S$', 
+    "Kl"  : r'$K^0_L$' 
+}
+
 
 def _known(sampler, species):
     pid = NAME_TO_PID.get(species)
@@ -58,10 +68,11 @@ def sample_many(sampler, species, E, n, seed=0):
 def plot_many(x, profs, species, E, out):
     plt.figure(figsize=(8, 5))
     for p in profs:
-        plt.plot(x / 100.0, p, color="#4c78a8", lw=0.4, alpha=0.25)
-    plt.plot(x / 100.0, profs.mean(0), color="#c0392b", lw=2.4, label="mean")
+        plt.plot(x / 100.0, p, color="#4c78a8", lw=0.5, alpha=0.5)
+    plt.plot(x / 100.0, profs.mean(0), color="#c0392b", lw=1.5, label="mean")
     plt.xlabel("depth  z  [m]"); plt.ylabel("Cherenkov photons / bin")
-    plt.title(f"{len(profs)} sampled {species} showers at {E:.0f} GeV")
+    plt.xlim(0,17)
+    plt.title(f"{len(profs)} sampled {names[species]} showers at {E/1000:.0f} TeV")
     plt.legend(); plt.grid(alpha=0.3); plt.tight_layout()
     plt.savefig(out, dpi=150); plt.close()
     print("wrote", out)
@@ -86,6 +97,7 @@ def plot_event(sampler, final_state, out_hadrons, out_composite, seed=1):
     if total is None:
         print("  no valid hadrons to plot"); plt.close(fig1); return
     ax1.set_xlabel("depth  z  [m]"); ax1.set_ylabel("photons / bin")
+    ax1.set_xlim(0,17)
     ax1.set_title("Sampled shower of each final-state hadron")
     ax1.legend(fontsize=8, ncol=2); ax1.grid(alpha=0.3)
     fig1.tight_layout(); fig1.savefig(out_hadrons, dpi=150); plt.close(fig1)
@@ -94,6 +106,7 @@ def plot_event(sampler, final_state, out_hadrons, out_composite, seed=1):
     fig2, ax2 = plt.subplots(figsize=(8.4, 5.2))
     ax2.plot(xref / 100.0, total, color="k", lw=2.6)
     ax2.set_xlabel("depth  z  [m]"); ax2.set_ylabel("photons / bin")
+    ax2.set_xlim(0,17)
     ax2.set_title("Composite hadronic shower (sum)"); ax2.grid(alpha=0.3)
     fig2.tight_layout(); fig2.savefig(out_composite, dpi=150); plt.close(fig2)
     print("wrote", out_composite)
