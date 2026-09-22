@@ -59,8 +59,11 @@ SPECIES_LATEX = {
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MODEL = os.path.join(
     _HERE, "..", "resources", "showers",
-    "GammaShowerModel", "GammaShowerModel-v1.0", "shower_model.npz",
+    "GammaShowerModel-v1.0", "shower_model.npz",
 )
+
+# numpy>=2 renamed trapz -> trapezoid; support both
+_trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
 
 _CLIP_SIGMA = 2.5      # truncate the sampled Gaussian at +-2.5 sigma (matches training)
 _COV_RIDGE = 1e-3      # PSD floor on covariance eigenvalues (matches training)
@@ -127,7 +130,7 @@ class Shower:
 
     @property
     def integral(self):
-        return float(np.trapz(self.photons, self.z))
+        return float(_trapz(self.photons, self.z))
 
     def __repr__(self):
         return (f"Shower({self.species} @ {self.energy:.0f} GeV, m={self.m}, "
@@ -441,9 +444,10 @@ def plot_many(model, species, E, n=100, rng=None, seed=0, ax=None,
     P = np.array([s.photons for s in showers])
     z_m = showers[0].z_m
     for p in P:
-        ax.plot(z_m, p, color=color, lw=0.4, alpha=0.25)
-    ax.plot(z_m, P.mean(0), color="#c0392b", lw=2.4, label="mean")
-    ax.set_title(f"{n} sampled {_latex(showers[0].species)} showers at {E:.0f} GeV")
+        ax.plot(z_m, p, color=color, lw=0.5, alpha=0.5)
+    ax.set_xlim(0, 20)
+    ax.plot(z_m, P.mean(0), color="#c0392b", lw=2.0, label="mean")
+    ax.set_title(f"{n} sampled {_latex(showers[0].species)} showers at {E/1000:.0f} TeV")
     ax.legend()
     return _finish(fig, ax, save, show)
 
@@ -465,7 +469,7 @@ def plot_species(model, items, n=1, rng=None, seed=0, ax=None,
         col = cmap(i % 10)
         showers = [model.sample(sp, E, rng) for _ in range(int(n))]
         z_m = showers[0].z_m
-        lab = f"{_latex(showers[0].species)}  {E:.0f} GeV"
+        lab = f"{_latex(showers[0].species)}  {E/1000:.0f} TeV"
         if n == 1:
             ax.plot(z_m, showers[0].photons, lw=1.6, color=col, label=lab)
         else:
@@ -475,6 +479,7 @@ def plot_species(model, items, n=1, rng=None, seed=0, ax=None,
             ax.plot(z_m, ref, lw=2.0, color=col,
                     label=lab + ("  (mean)" if mean else ""))
     ttl = "Sampled showers" if n == 1 else f"{n} sampled showers per species"
+    ax.set_xlim(0, 20)
     ax.set_title(ttl)
     ax.legend(fontsize=8, ncol=2)
     return _finish(fig, ax, save, show)
@@ -494,6 +499,7 @@ def plot_event(model, final_state, event=None, composite=True, rng=None, seed=1,
                 label=f"{_latex(s.species)} {s.energy:.0f} GeV (m={s.m})")
     if composite:
         ax.plot(ev.z_m, ev.composite, color="k", lw=2.6, label="composite (sum)")
+    ax.set_xlim(0, 20)
     ax.set_title("Sampled hadronic shower of a final state")
     ax.legend(fontsize=8, ncol=2)
     return _finish(fig, ax, save, show)
