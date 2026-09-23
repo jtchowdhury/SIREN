@@ -55,6 +55,7 @@ SPECIES = [
     (111, "pi0"), (211, "pip"), (-211, "pim"),
     (321, "Kp"), (-321, "Km"), (310, "KS"), (130, "KL"),
     (2212, "p"), (2112, "n"),
+    (11, "em"), (-11, "ep"),
 ]
 NAME_TO_PID = {name: pid for pid, name in SPECIES}
 PID_TO_NAME = {pid: name for pid, name in SPECIES}
