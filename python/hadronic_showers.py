@@ -604,3 +604,160 @@ def plot_overlay(model, items, n=100, rng=None, seed=0, colors=None,
         ax.set_xlim(*xlim)
     ax.legend()
     return _finish(fig, ax, save, show)
+
+
+# ---------------------------------------------------------------------------
+#  whole-event composite profile plots
+# ---------------------------------------------------------------------------
+def _norm_curve(z_cm, y):
+    """Unit-area density [1/cm] of a composite profile."""
+    y = np.asarray(y, float)
+    area = _trapz(y, z_cm)
+    return y / area if area > 0 else y
+
+
+def top_k_final_state(pids, energies, e_had, top_k=10, rng=None):
+    """Energy-conserving final state: the top_k most energetic model-known hadrons
+    plus ONE pi0 carrying e_had - sum(top_k). By construction the total energy of
+    the returned hadrons equals e_had exactly."""
+    rng = rng or np.random.default_rng()
+    hadrons = []
+    for pid, e in zip(pids, energies):
+        pid = int(pid)
+        if pid == 0 or not np.isfinite(e) or e <= 0:
+            continue
+        name = PID_TO_NAME.get(pid)
+        if name is None and abs(pid) == 311:
+            name = "KS" if rng.random() < 0.5 else "KL"
+        if name in (None, "em", "ep"):            # skip non-hadrons / leptons
+            continue
+        hadrons.append((name, float(e)))
+    hadrons.sort(key=lambda t: -t[1])
+    top = hadrons[:top_k]
+    rem = max(float(e_had) - sum(e for _, e in top), 0.0)
+    fs = list(top)
+    if rem > 0:
+        fs.append(("pi0", rem))
+    return fs
+
+
+def _read_event_store(path):
+    """Load the PYTHIA events store: a .npz (from pythia_events_to_npz.py) with
+    arrays E_had, top20_pids, top20_energies. Numpy-only -- no h5py at run time."""
+    if not str(path).endswith(".npz"):
+        raise ValueError("event store must be the .npz built by pythia_events_to_npz.py")
+    d = np.load(path, allow_pickle=False)
+    return (np.asarray(d["E_had"], float),
+            np.asarray(d["top20_pids"]),
+            np.asarray(d["top20_energies"], float))
+
+
+def event_bins(EH, n_bins=12):
+    """Log-spaced E_had bin edges over the event store (same scheme as the L2 plot)."""
+    lo, hi = max(float(EH.min()), 1.0), float(EH.max())
+    return np.logspace(np.log10(lo), np.log10(hi), n_bins + 1)
+
+
+def select_events(source, e_had=None, n=100, n_bins=12, top_k=10, rng=None):
+    """Pick events from the store and build energy-conserving final states.
+
+    You give a SPECIFIC energy `e_had`; we find the log-E_had bin it lands in and
+    sample `n` events from that bin, widening into the nearest neighbouring bins
+    only if the bin holds fewer than `n`. Returns (final_states, (Emin, Emax)) --
+    the actual E_had range of the picked events, for labelling. With e_had=None a
+    random `n` events are taken."""
+    rng = rng or np.random.default_rng()
+    EH, PD, EN = _read_event_store(source)
+    if e_had is None:
+        sel = rng.choice(len(EH), min(n, len(EH)), replace=False)
+    else:
+        edges = event_bins(EH, n_bins)
+        which = np.clip(np.digitize(EH, edges) - 1, 0, n_bins - 1)
+        b = int(np.clip(np.digitize([e_had], edges)[0] - 1, 0, n_bins - 1))
+        pool = []
+        for k in sorted(range(n_bins), key=lambda kk: abs(kk - b)):   # bin b, then neighbours
+            pool.extend(np.where(which == k)[0].tolist())
+            if len(pool) >= n:
+                break
+        pool = np.asarray(pool)
+        sel = rng.choice(pool, min(n, len(pool)), replace=False)
+    fss = [top_k_final_state(PD[i], EN[i], EH[i], top_k, rng) for i in sel]
+    erange = (float(EH[sel].min()), float(EH[sel].max()))
+    return fss, erange
+
+
+def _erange_label(erange, requested=None):
+    lo, hi = erange
+    s = rf"$E_{{\mathrm{{had}}}}\in$[{lo:.0f}, {hi:.0f}] GeV"
+    return s + (rf"  (req {requested:.0f})" if requested is not None else "")
+
+
+def plot_event_fluctuation(model, source=None, e_had=None, final_state=None, n=100,
+                           n_bins=12, top_k=10, rng=None, seed=0, color="#4c78a8",
+                           xlim=(0, 1700), ax=None, save=None, show=False):
+    """(a) Sample ONE event's composite n times -> the MODEL's own spread for a FIXED
+    final state (a narrow band = sampler noise). Normalized.
+
+    Provide either `final_state` directly, or `source` + `e_had`: one event is then
+    drawn at random from the E_had bin containing e_had."""
+    if rng is None:
+        rng = np.random.default_rng(seed)
+    if final_state is None:
+        if source is None or e_had is None:
+            raise ValueError("give final_state, or source and e_had")
+        fss, _er = select_events(source, e_had=e_had, n=1, n_bins=n_bins,
+                                 top_k=top_k, rng=rng)
+        final_state = fss[0]
+    elif isinstance(final_state, str):
+        final_state = load_final_state(final_state)
+    fig, ax = _new_ax(ax)
+    Y, z = [], None
+    for _ in range(int(n)):
+        ev = model.sample_event(final_state, rng=rng)
+        z = ev.z if z is None else z
+        y = _norm_curve(ev.z, ev.composite)
+        Y.append(y)
+        ax.plot(ev.z, y, color=color, lw=0.4, alpha=0.25)
+    ax.plot(z, np.mean(Y, axis=0), color="#c0392b", lw=2.4, label="mean")
+    ax.set_xlim(*xlim)
+    Etot = sum(E for _, E in final_state)
+    ax.set_title(rf"{n} samples of one event  ($E_{{\mathrm{{had}}}}$ = {Etot:.0f} GeV)")
+    ax.legend()
+    return _finish(fig, ax, save, show)
+
+
+def plot_events(model, events, rng=None, seed=0, color="#4c78a8", mean=True,
+                xlim=(0, 1700), title=None, ax=None, save=None, show=False):
+    """(b) One composite per event -> the PHYSICAL event-to-event spread. `events`
+    is a list of final states (each [(species, E), ...]). Normalized."""
+    if rng is None:
+        rng = np.random.default_rng(seed)
+    fig, ax = _new_ax(ax)
+    Y, z = [], None
+    for fs in events:
+        if not fs:
+            continue
+        ev = model.sample_event(fs, rng=rng)
+        z = ev.z if z is None else z
+        y = _norm_curve(ev.z, ev.composite)
+        Y.append(y)
+        ax.plot(ev.z, y, color=color, lw=0.4, alpha=0.25)
+    if mean and Y:
+        ax.plot(z, np.mean(Y, axis=0), color="#c0392b", lw=2.4, label="mean")
+        ax.legend()
+    ax.set_xlim(*xlim)
+    ax.set_title(title or f"{len(Y)} sampled event composites")
+    return _finish(fig, ax, save, show)
+
+
+def plot_events_at_energy(model, source, e_had, n=100, n_bins=12, top_k=10, seed=0,
+                          xlim=(0, 1700), save=None, show=False):
+    """(b) Sample one composite each for n events from the E_had bin containing
+    `e_had` (widening to neighbours if sparse). `source` is the pythia events .npz.
+    The plot title shows the actual E_had range of the events used."""
+    rng = np.random.default_rng(seed)
+    events, er = select_events(source, e_had=e_had, n=n, n_bins=n_bins,
+                               top_k=top_k, rng=rng)
+    title = f"{len(events)} event composites,  " + _erange_label(er, e_had)
+    return plot_events(model, events, rng=rng, xlim=xlim, title=title,
+                       save=save, show=show)
