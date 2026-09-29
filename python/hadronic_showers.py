@@ -269,7 +269,8 @@ class HadronicShowerModel:
             warnings.warn(
                 f"E={E:.3g} GeV is outside the trained range "
                 f"[{10**entry['logE_lo']:.3g}, {10**entry['logE_hi']:.3g}] GeV "
-                f"for {entry['name']}; clamping to the edge.", stacklevel=3)
+                f"for {entry['name']}; holding shape at the edge and scaling "
+                f"yield proportional to E.", stacklevel=3)
             lq = min(max(lq, entry["logE_lo"]), entry["logE_hi"])
         return lq
 
@@ -320,6 +321,11 @@ class HadronicShowerModel:
             s = float(max(entry["logNsig"](lq), 0.0))
             if s > 0:
                 N *= float(np.exp(rng.normal(0.0, s)))
+            # Outside the trained range lq is clamped to the nearest bound: we hold
+            # the shape there but scale the yield proportional to the true energy
+            # (yield ~ E), the same rescaling the G4 reference uses. In-range this
+            # factor is exactly 1 (10**lq == E), so it only affects out-of-range E.
+            N *= float(E) / (10.0 ** lq)
         photons = N * np.sum([w[i] * _kernel(x, alpha[i], beta[i])
                               for i in range(m)], axis=0)
         return Shower(species=name, pid=pid, energy=float(E), z=x, photons=photons,
