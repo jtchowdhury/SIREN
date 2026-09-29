@@ -37,6 +37,9 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.special import gammaln
 from scipy.interpolate import CubicSpline
+import matplotlib.pyplot as plt
+from matplotlib.ticker import ScalarFormatter
+
 
 # --------------------------------------------------------------------------
 #  hadron types (must match geant4_shower/.../shower_gamma_model.SPECIES)
@@ -103,6 +106,27 @@ def _from_z(z, m):
     w = e / e.sum()
     a, b = _comp_from_z(lc, ls)
     return w, np.asarray(a, float), np.asarray(b, float)
+
+
+class _Const:
+    """Constant curve: returns the stored value for any energy. Used for a
+    species trained at a single energy (e.g. electron at just 1 TeV), where a
+    spline over one point is impossible."""
+    def __init__(self, value):
+        self.value = np.asarray(value, float)
+
+    def __call__(self, q):
+        return self.value
+
+
+def _make_curve(logE, y):
+    """CubicSpline over the energy grid, or a constant if the grid has <2
+    distinct (strictly increasing) points -- the single-energy case."""
+    logE = np.asarray(logE, float)
+    y = np.asarray(y, float)
+    if logE.size < 2 or not np.all(np.diff(logE) > 0):
+        return _Const(y[0])
+    return CubicSpline(logE, y, axis=0, extrapolate=True)
 
 
 # --------------------------------------------------------------------------
@@ -181,19 +205,17 @@ class HadronicShowerModel:
                 "name": sp["name"],
                 "logE_range": tuple(sp["logE_range"]),
                 "z": d[f"{pid}|z"],
-                "pm": CubicSpline(logE, d[f"{pid}|pm"], axis=0, extrapolate=True),
-                "logN": CubicSpline(logE, d[f"{pid}|logN"], extrapolate=True),
-                "logNsig": CubicSpline(logE, d[f"{pid}|logNsig"], extrapolate=True),
+                "pm": _make_curve(logE, d[f"{pid}|pm"]),
+                "logN": _make_curve(logE, d[f"{pid}|logN"]),
+                "logNsig": _make_curve(logE, d[f"{pid}|logNsig"]),
                 "logE_lo": float(logE[0]),
                 "logE_hi": float(logE[-1]),
                 "m": {},
             }
             for m in sp["m_available"]:
                 entry["m"][int(m)] = {
-                    "mean": CubicSpline(logE, d[f"{pid}|m{m}|mean"], axis=0,
-                                        extrapolate=True),
-                    "cov": CubicSpline(logE, d[f"{pid}|m{m}|cov"], axis=0,
-                                       extrapolate=True),
+                    "mean": _make_curve(logE, d[f"{pid}|m{m}|mean"]),
+                    "cov": _make_curve(logE, d[f"{pid}|m{m}|cov"]),
                 }
             per_pid[pid] = entry
         return cls(per_pid, meta)
@@ -218,6 +240,12 @@ class HadronicShowerModel:
     def z_centers(self, species):
         pid, _ = self._resolve(species)
         return self._pid[pid]["z"]
+
+    def yield_mean(self, species, E):
+        """Mean total Cherenkov yield (amplitude) at energy E [GeV]."""
+        pid, _ = self._resolve(species)
+        entry = self._pid[pid]
+        return float(np.exp(entry["logN"](self._lq(entry, E))))
 
     # ---- internals ----
     @staticmethod
@@ -419,47 +447,43 @@ def _elabel(E):
     return f"{E / 1000:g} TeV" if E >= 1000 else f"{E:g} GeV"
 
 
-# normalized-profile y-axis (unit-area density, integral over x = 1)
-_YLABEL_RAW = "Cherenkov photons / bin"
-_YLABEL_NORM = r"$\hat{\ell}_{\mathrm{tot}}^{-1}\,\mathrm{d}\hat{\ell}/\mathrm{d}x$"
+# profiles are always plotted as the unit-area density (integral over x[cm] = 1)
+XLABEL = r"$x$  [cm]"
+YLABEL = r"$\hat{\ell}_{\mathrm{tot}}^{-1}\,\mathrm{d}\hat{\ell}/\mathrm{d}x$  [1/cm]"
 
-
-def _xy(shower, normalize, xunits):
-    """(x, y) for one shower under the chosen depth units / normalization.
-    normalize=True gives the unit-area density (integral over x = 1), i.e. the
-    l_tot^-1 dl/dx quantity in [1/xunit]; otherwise raw photons/bin."""
-    x = shower.z if xunits == "cm" else shower.z_m
+def _norm_xy(shower):
+    """Depth [cm] and unit-area density [1/cm] for one shower."""
+    x = shower.z
     y = np.asarray(shower.photons, float)
-    if normalize:
-        area = _trapz(y, x)
-        if area > 0:
-            y = y / area
+    area = _trapz(y, x)
+    if area > 0:
+        y = y / area
     return x, y
 
 
-def _labels(normalize, xunits):
-    xl = r"depth  $x$  [cm]" if xunits == "cm" else r"depth  $z$  [m]"
-    if normalize:
-        yl = _YLABEL_NORM + ("  [1/cm]" if xunits == "cm" else "  [1/m]")
-    else:
-        yl = _YLABEL_RAW
-    return xl, yl
-
-
 def _new_ax(ax, figsize=(8.4, 5.2)):
-    import matplotlib.pyplot as plt
     if ax is not None:
         return ax.figure, ax
     fig, ax = plt.subplots(figsize=figsize)
     return fig, ax
 
 
-def _finish(fig, ax, save, show, xlabel=r"depth  $z$  [m]", ylabel=_YLABEL_RAW):
-    import matplotlib.pyplot as plt
-    if xlabel:
-        ax.set_xlabel(xlabel)
-    if ylabel:
-        ax.set_ylabel(ylabel)
+def _finish(fig, ax, save, show):
+    ax.set_xlabel(XLABEL, fontsize=16)
+    ax.set_ylabel(YLABEL, fontsize=16)
+    ax.tick_params(labelsize=14)
+    ax.title.set_fontsize(18)
+    leg = ax.get_legend()
+
+    # Scientific notation on y-axis
+    formatter = ScalarFormatter(useMathText=True)
+    formatter.set_scientific(True)
+    formatter.set_powerlimits((0, 0))
+    ax.yaxis.set_major_formatter(formatter)
+
+    if leg is not None:
+        for t in leg.get_texts():
+            t.set_fontsize(14)
     ax.grid(alpha=0.3)
     fig.tight_layout()
     if save:
@@ -471,31 +495,27 @@ def _finish(fig, ax, save, show, xlabel=r"depth  $z$  [m]", ylabel=_YLABEL_RAW):
 
 
 def plot_many(model, species, E, n=100, rng=None, seed=0, ax=None,
-              save=None, show=False, color="#4c78a8", normalize=False, xunits="m"):
-    """Plot type: overplot n sampled showers of ONE species + their mean.
-    normalize=True -> unit-area density [1/xunit]; xunits 'm' or 'cm'."""
+              save=None, show=False, color="#4c78a8", xlim=(0, 1700)):
+    """Overplot n sampled showers of ONE species + their mean (normalized density)."""
     showers = model.sample_many(species, E, n, rng=rng, seed=seed)
     fig, ax = _new_ax(ax)
-    xy = [_xy(s, normalize, xunits) for s in showers]
+    xy = [_norm_xy(s) for s in showers]
     x0 = xy[0][0]
     Y = np.array([y for _x, y in xy])
     for y in Y:
         ax.plot(x0, y, color=color, lw=0.5, alpha=0.5)
-    ax.set_xlim(0, 20 if xunits == "m" else 2000)
     ax.plot(x0, Y.mean(0), color="#c0392b", lw=2.0, label="mean")
+    ax.set_xlim(*xlim)
     ax.set_title(f"{n} sampled {_latex(showers[0].species)} showers at {E/1000:.0f} TeV")
     ax.legend()
-    xl, yl = _labels(normalize, xunits)
-    return _finish(fig, ax, save, show, xl, yl)
+    return _finish(fig, ax, save, show)
 
 
 def plot_species(model, items, n=1, rng=None, seed=0, ax=None,
-                 save=None, show=False, mean=False, normalize=False, xunits="m"):
-    """Plot type: one shower (n=1) or n showers each for several species.
-    normalize=True -> unit-area density [1/xunit]; xunits 'm' or 'cm'.
+                 save=None, show=False, mean=False, xlim=(0, 1700)):
+    """One shower (n=1) or n showers each for several species (normalized density).
 
     items : list of (species, E_GeV)."""
-    import matplotlib.pyplot as plt
     if rng is None:
         rng = np.random.default_rng(seed)
     fig, ax = _new_ax(ax)
@@ -506,7 +526,7 @@ def plot_species(model, items, n=1, rng=None, seed=0, ax=None,
             continue
         col = cmap(i % 10)
         showers = [model.sample(sp, E, rng) for _ in range(int(n))]
-        xy = [_xy(s, normalize, xunits) for s in showers]
+        xy = [_norm_xy(s) for s in showers]
         x0 = xy[0][0]
         lab = f"{_latex(showers[0].species)}  {E/1000:.0f} TeV"
         if n == 1:
@@ -517,62 +537,52 @@ def plot_species(model, items, n=1, rng=None, seed=0, ax=None,
             ref = np.mean([y for _x, y in xy], axis=0) if mean else xy[0][1]
             ax.plot(x0, ref, lw=2.0, color=col,
                     label=lab + ("  (mean)" if mean else ""))
-    ttl = "Sampled showers" if n == 1 else f"{n} sampled showers per species"
-    ax.set_xlim(0, 20 if xunits == "m" else 2000)
-    ax.set_title(ttl)
-    ax.legend(fontsize=8, ncol=2)
-    xl, yl = _labels(normalize, xunits)
-    return _finish(fig, ax, save, show, xl, yl)
+    ax.set_xlim(*xlim)
+    ax.set_title("Sampled showers" if n == 1 else f"{n} sampled showers per species")
+    ax.legend()
+    return _finish(fig, ax, save, show)
 
 
 def plot_event(model, final_state, event=None, composite=True, rng=None, seed=1,
-               ax=None, save=None, show=False, normalize=False, xunits="m"):
-    """Plot type: one shower per final-state hadron; overplot the composite (sum).
-    normalize=True divides every curve by ONE shared scale (the composite's
-    integral, or the summed hadron integrals if composite is off) so the hadrons
-    still add up to the composite and the composite integrates to 1 [1/xunit].
+               ax=None, save=None, show=False, xlim=(0, 1700)):
+    """One shower per final-state hadron + composite (sum), normalized density.
+    Every curve is divided by one shared scale (the composite's integral) so the
+    hadrons still add up to the composite and the composite integrates to 1.
 
     final_state : CSV path or list of (species, E_GeV)."""
     if isinstance(final_state, str):
         final_state = load_final_state(final_state, event=event)
     ev = model.sample_event(final_state, rng=rng, seed=seed, composite=composite)
     fig, ax = _new_ax(ax)
-    xg = ev.z if xunits == "cm" else ev.z_m
-    scale = 1.0
-    if normalize:
-        if composite and ev.composite is not None:
-            area = _trapz(ev.composite, xg)
-        else:
-            area = sum(_trapz(s.photons, xg) for s in ev.showers)
-        scale = area if area > 0 else 1.0
+    xg = ev.z
+    if composite and ev.composite is not None:
+        area = _trapz(ev.composite, xg)
+    else:
+        area = sum(_trapz(s.photons, xg) for s in ev.showers)
+    scale = area if area > 0 else 1.0
     for s in ev.showers:
         ax.plot(xg, s.photons / scale, lw=1.2, alpha=0.85,
                 label=f"{_latex(s.species)} {s.energy:.0f} GeV (m={s.m})")
     if composite:
         ax.plot(xg, ev.composite / scale, color="k", lw=2.6, label="composite (sum)")
-    ax.set_xlim(0, 20 if xunits == "m" else 2000)
+    ax.set_xlim(*xlim)
     ax.set_title("Sampled hadronic shower of a final state")
-    ax.legend(fontsize=8, ncol=2)
-    xl, yl = _labels(normalize, xunits)
-    return _finish(fig, ax, save, show, xl, yl)
+    ax.legend()
+    return _finish(fig, ax, save, show)
 
 
-def plot_overlay(model, items, n=100, normalize=True, xunits="cm", rng=None,
-                 seed=0, colors=None, lw=0.5, alpha=0.5, xlim=None, ax=None,
-                 save=None, show=False):
+def plot_overlay(model, items, n=100, rng=None, seed=0, colors=None,
+                 lw=0.5, alpha=0.5, xlim=(0, 1700), ax=None, save=None, show=False):
     """Overplot n sampled showers for each (species, E) item, colored per item --
-    the e- vs pi+ style comparison plot. Normalized to unit area (density in
-    [1/cm]) by default; set normalize=False for raw photons/bin.
+    the e- vs pi+ style comparison plot (normalized density).
 
     items : list of (species, E_GeV), e.g. [("em", 1000), ("pip", 1000)].
-
-    Species not (yet) in the model are skipped with a note -- so you can run this
-    for ("em", ...) only after the electron model has been built and loaded."""
+    Species not (yet) in the model are skipped with a note."""
     if rng is None:
         rng = np.random.default_rng(seed)
     if colors is None:
         colors = ["#4c78a8", "#f58518", "#54a24b", "#b279a2", "#e45756"]
-    fig, ax = _new_ax(ax, figsize=(6.4, 6.0))
+    fig, ax = _new_ax(ax, figsize=(8, 6))
     for i, (sp, E) in enumerate(items):
         if not model.has(sp):
             print(f"  skip {sp!r}: not in the model")
@@ -580,12 +590,11 @@ def plot_overlay(model, items, n=100, normalize=True, xunits="cm", rng=None,
         col = colors[i % len(colors)]
         first = True
         for _ in range(int(n)):
-            x, y = _xy(model.sample(sp, E, rng), normalize, xunits)
+            x, y = _norm_xy(model.sample(sp, E, rng))
             ax.plot(x, y, color=col, lw=lw, alpha=alpha,
                     label=(f"{_elabel(E)} {_latex(sp)} ({n} runs)" if first else None))
             first = False
     if xlim is not None:
         ax.set_xlim(*xlim)
     ax.legend()
-    xl, yl = _labels(normalize, xunits)
-    return _finish(fig, ax, save, show, xl, yl)
+    return _finish(fig, ax, save, show)
