@@ -362,7 +362,7 @@ def _plot(rows, forms, args, sigma):
     ax1.set_ylabel(r"$L_2$ ($\sum(\mathrm{data}-\mathrm{model})^2/\sum\mathrm{data}^2$)",
                    fontsize=13)
     note = "  [unblurred G4]" if sigma <= 0 else ""
-    ax1.set_title(f"Sampled Event Shower vs Geant4 (composite, top-{args.top_k}+$\\pi^0$){note}\n",
+    ax1.set_title(f"Sampled vs Simulated (G4) Event Shower",
                   fontsize=15, fontweight="bold", pad=10)
     ax1.legend(fontsize=11, framealpha=0.92, loc="best")
 
