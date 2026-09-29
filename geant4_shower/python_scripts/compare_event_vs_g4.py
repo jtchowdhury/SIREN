@@ -239,6 +239,13 @@ def run(args):
               "the .npz); dropping the Single Gamma curve.")
         args.with_single = False
     lib = load_g4_library(args.g4_dir)
+    have = sorted(PID_TO_NAME.get(p, str(p)) for p in lib)
+    print(f"G4 library species ({len(have)}): {have}")
+    missing = [n for n in ("pi0", "pip", "pim", "Kp", "Km", "KS", "KL", "p", "n")
+               if n not in have]
+    if missing:
+        print(f"  WARNING: G4 library is missing {missing}; events whose hadrons "
+              f"are all missing get no G4 composite and are skipped.")
     # common depth grid (all species share the detector binning)
     any_pid = next(iter(lib)); any_E = next(iter(lib[any_pid]))
     x = np.asarray(lib[any_pid][any_E]["z_centers"], float)
@@ -255,7 +262,8 @@ def run(args):
 
     forms = ["analytic", "mixture", "floor"] + (["single"] if args.with_single else [])
     rng = np.random.default_rng(args.seed)
-    rows = []   # (E_center, form, l2, ks)
+    rows = []            # (E_center, form, l2, ks)
+    n_nog4 = 0           # events dropped for lack of any G4 truth
 
     for b in range(args.n_bins):
         idx = np.where(which == b)[0]
@@ -264,24 +272,35 @@ def run(args):
         if len(idx) > args.n_per_bin:
             idx = rng.choice(idx, args.n_per_bin, replace=False)
         acc = {f: {"l2": [], "ks": []} for f in forms}
+        used = []
         for i in idx:
             fs = _event_final_state(PIDS[i], ENER[i], E_had[i], rng, args.top_k)
             if not fs:
                 continue
             g4A = _composite(fs, x, "g4", model, lib, rng)
+            if not np.any(g4A > 0):        # no G4 truth for this event -> skip
+                n_nog4 += 1
+                continue
+            used.append(i)
             for f in forms:
                 comp = (_composite(fs, x, "g4", model, lib, rng)
                         if f == "floor" else
                         _composite(fs, x, f, model, lib, rng))
                 l2, ks = _l2_ks(g4A, comp, sigma, binw)
                 acc[f]["l2"].append(l2); acc[f]["ks"].append(ks)
-        Ecen = float(np.exp(np.mean(np.log(E_had[idx]))))       # geo-mean E_had in bin
+        if not used:
+            print(f"  bin {b:2d}: skipped (no scorable events)")
+            continue
+        Ecen = float(np.exp(np.mean(np.log(E_had[used]))))     # geo-mean E_had in bin
         for f in forms:
-            rows.append((Ecen, f,
-                         float(np.nanmean(acc[f]["l2"])),
-                         float(np.nanmean(acc[f]["ks"]))))
-        print(f"  bin {b:2d}: E_had~{Ecen:8.1f} GeV  n={len(idx)}")
+            rows.append((Ecen, f, _nanmean(acc[f]["l2"]), _nanmean(acc[f]["ks"])))
+        print(f"  bin {b:2d}: E_had~{Ecen:8.1f} GeV  n={len(used)}")
 
+    if n_nog4:
+        print(f"  ({n_nog4} events skipped for lack of any G4-library shower)")
+    if not rows:
+        raise SystemExit("no scorable bins -- check that the G4 library in --g4-dir "
+                         "actually contains the hadron species.")
     _plot(rows, forms, args, sigma)
     _write_csv(rows, os.path.join(args.outdir, "event_vs_g4.csv"))
 
@@ -296,11 +315,19 @@ def _write_csv(rows, path):
     print("wrote", path)
 
 
+def _nanmean(a):
+    """Mean of the finite values; NaN if none (no RuntimeWarning on empty/all-NaN)."""
+    a = np.asarray(a, float)
+    a = a[np.isfinite(a)]
+    return float(a.mean()) if a.size else float("nan")
+
+
 def _series(rows, form, k):
     pts = sorted((E, l2, ks) for (E, f, l2, ks) in rows if f == form)
     E = np.array([p[0] for p in pts])
     v = np.array([p[1 if k == "l2" else 2] for p in pts])
-    return E, v
+    ok = np.isfinite(E) & np.isfinite(v) & (v > 0)          # log-axis safe
+    return E[ok], v[ok]
 
 
 def _plot(rows, forms, args, sigma):
@@ -312,11 +339,13 @@ def _plot(rows, forms, args, sigma):
     order = [f for f in ("analytic", "single", "mixture") if f in forms] + ["floor"]
 
     def draw(ax, k):
+        any_pts = False
         for f in order:
             label, color = META[f]
             E, v = _series(rows, f, k)
             if len(E) == 0:
                 continue
+            any_pts = True
             if f == "floor":
                 ax.plot(E, v, "--", color=color, lw=2.0, alpha=0.9, label=label)
             else:
@@ -325,9 +354,11 @@ def _plot(rows, forms, args, sigma):
                         alpha=0.85, label=label)
         ax.grid(True, which="major", ls=":", lw=0.9, color="#bbbbbb", alpha=0.7)
         ax.tick_params(axis="both", which="major", labelsize=12, length=6)
+        return any_pts
 
-    draw(ax1, "l2")
-    ax1.set_yscale("log")
+    has1 = draw(ax1, "l2")
+    if has1:
+        ax1.set_yscale("log")
     ax1.set_ylabel(r"$L_2$ ($\sum(\mathrm{data}-\mathrm{model})^2/\sum\mathrm{data}^2$)",
                    fontsize=13)
     note = "  [unblurred G4]" if sigma <= 0 else ""
@@ -335,8 +366,10 @@ def _plot(rows, forms, args, sigma):
                   fontsize=15, fontweight="bold", pad=10)
     ax1.legend(fontsize=11, framealpha=0.92, loc="best")
 
-    draw(ax2, "ks")
-    ax2.set_xscale("log"); ax2.set_yscale("log")
+    has2 = draw(ax2, "ks")
+    ax2.set_xscale("log")
+    if has2:
+        ax2.set_yscale("log")
     ax2.set_ylabel("KS statistic", fontsize=14)
     ax2.set_xlabel(r"Hadronic Shower Energy  $E_\mathrm{had}$  [GeV]", fontsize=15)
     ax2.legend(fontsize=11, framealpha=0.92, loc="best")
