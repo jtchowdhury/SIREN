@@ -176,9 +176,13 @@ if __name__ == "__main__":
     os.makedirs("output", exist_ok=True)
 
     # Neutrino energies to scan. E_had = E_nu * y, so each E_nu gives a broad
-    # E_had distribution. We store E_had per event and bin in the analysis script.
-    E_nu_values = [1e2, 1e3, 1e4, 1e5]  # GeV: 100 GeV, 1 TeV, 10 TeV, 100 TeV
-    N_EVENTS    = 10000
+    # E_had distribution; we pool all events and bin by E_had in the analysis.
+    # A dense half-decade grid over the typical IceCube range (100 GeV - 10 PeV)
+    # gives overlapping, smooth E_had coverage. PYTHIA is fast, so we keep a few
+    # thousand events per point to populate the sparse high-E_had bins (which
+    # only fill from high-y events at the top energies).
+    E_nu_values = np.logspace(2, 7, 11)   # 100 GeV -> 10 PeV, half-decade (11 points)
+    N_EVENTS    = 5000
 
     outfile = "output/pythia_dis_secondaries_nue.h5"   # nu_e run; keeps the nu_mu file intact
     with h5py.File(outfile, "w") as f:
