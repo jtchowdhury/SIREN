@@ -40,8 +40,8 @@ WALLTIME="3-00:00:00"
 PID=11
 NAME=em
 NEVENTS=1000
-#ENERGIES=(10 30 100 300 1000 3000 10000 30000)
-ENERGIES=(1000)
+ENERGIES=(10 30 100 300 1000 3000 10000 30000)   # full scan (match the hadron grid)
+#ENERGIES=(1000)                                  # (single point, for a quick test)
 
 for E in "${ENERGIES[@]}"; do
     OUTFILE="${OUTDIR}/shower_${NAME}_E${E}GeV.h5"
@@ -52,8 +52,12 @@ for E in "${ENERGIES[@]}"; do
         continue
     fi
 
+    # NOTE: sim has no baked-in RPATH, so the Geant4 shared libs (libG4Tree.so
+    # etc., installed in the conda env) must be put on LD_LIBRARY_PATH at run
+    # time, or the job dies with "error while loading shared libraries".
     WRAP="source /n/sw/Miniforge3-25.3.1-0/etc/profile.d/conda.sh && \
           conda activate siren-dev && \
+          export LD_LIBRARY_PATH=\\\$CONDA_PREFIX/lib:\\\$LD_LIBRARY_PATH && \
           $SIMBIN --pid $PID --energy $E --nevents $NEVENTS --output $OUTFILE"
 
     CMD="sbatch \

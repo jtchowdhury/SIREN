@@ -1,7 +1,7 @@
 """
 generate_pythia_dis.py
 ----------------------
-Runs PYTHIA8 CC DIS events (nu_mu + p) at several neutrino energies and
+Runs PYTHIA8 CC DIS events (nu_e + p) at several neutrino energies and
 records the hadronic final-state secondaries for each event.
 
 Output: output/pythia_dis_secondaries.h5
@@ -37,7 +37,12 @@ MUP, MUM  = -13,   13
 
 KAON_IDS    = {KP, KM, KS, KL}
 NUCLEON_IDS = {PRO, NEU}
-LEPTON_IDS  = {13, -13, 14, -14, 12, -12, 16, -16}  # muons + neutrinos = invisible
+LEPTON_IDS  = {11, -11, 13, -13, 15, -15,
+               12, -12, 14, -14, 16, -16}  # charged leptons + neutrinos = not hadronic
+# NOTE: electrons (11) are now excluded, which matters for nu_e running: the
+# scattered charged lepton in CC nu_e DIS is an electron, and it must NOT be
+# counted in the hadronic final state (E_had). Its energy is E_nu - E_had and,
+# if you want its EM shower, it is handled separately with the electron model.
 
 def cherenkov_weight(pid):
     """
@@ -77,7 +82,7 @@ def run_dis_events(E_nu_GeV, n_events=10000):
 
     # CC weak boson exchange: nu_mu + p -> mu- + X
     pythia.readString("WeakBosonExchange:ff2ff(t:W) = on")
-    pythia.readString("Beams:idA = 14")            # nu_mu
+    pythia.readString("Beams:idA = 12")            # nu_e  (12=nu_e, 14=nu_mu, 16=nu_tau)
     pythia.readString("Beams:idB = 2212")          # proton (isoscalar approx)
     pythia.readString("Beams:frameType = 2")       # specify eA, eB separately
     pythia.readString(f"Beams:eA = {E_nu_GeV}")    # neutrino energy [GeV]
@@ -175,7 +180,7 @@ if __name__ == "__main__":
     E_nu_values = [1e2, 1e3, 1e4, 1e5]  # GeV: 100 GeV, 1 TeV, 10 TeV, 100 TeV
     N_EVENTS    = 10000
 
-    outfile = "output/pythia_dis_secondaries.h5"
+    outfile = "output/pythia_dis_secondaries_nue.h5"   # nu_e run; keeps the nu_mu file intact
     with h5py.File(outfile, "w") as f:
         for E_nu in E_nu_values:
             label = f"E_nu_{E_nu:.0e}"

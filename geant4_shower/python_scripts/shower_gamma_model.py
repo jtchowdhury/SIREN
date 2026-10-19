@@ -55,7 +55,9 @@ SPECIES = [
     (111, "pi0"), (211, "pip"), (-211, "pim"),
     (321, "Kp"), (-321, "Km"), (310, "KS"), (130, "KL"),
     (2212, "p"), (2112, "n"),
-    (11, "em"), (-11, "ep"),
+    (11, "em"), (-11, "ep"),       # electron / positron (EM showers)
+    (22, "ph"),                    # photon (EM shower; ~1 X0 deeper than e-)
+    (-2212, "pbar"), (-2112, "nbar"),   # antinucleons (hadronic, incl. annihilation)
 ]
 NAME_TO_PID = {name: pid for pid, name in SPECIES}
 PID_TO_NAME = {pid: name for pid, name in SPECIES}

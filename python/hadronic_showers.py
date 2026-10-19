@@ -49,6 +49,8 @@ SPECIES = [
     (321, "Kp"), (-321, "Km"), (310, "KS"), (130, "KL"),
     (2212, "p"), (2112, "n"),
     (11, "em"), (-11, "ep"),        # electron / positron (EM showers)
+    (22, "ph"),                     # photon (EM shower)
+    (-2212, "pbar"), (-2112, "nbar"),   # antinucleons
 ]
 NAME_TO_PID = {name: pid for pid, name in SPECIES}
 PID_TO_NAME = {pid: name for pid, name in SPECIES}
@@ -56,6 +58,7 @@ SPECIES_LATEX = {
     "pip": r"$\pi^{+}$", "pim": r"$\pi^{-}$", "pi0": r"$\pi^{0}$",
     "Kp": r"$K^{+}$", "Km": r"$K^{-}$", "KS": r"$K^{0}_{S}$", "KL": r"$K^{0}_{L}$",
     "p": r"$p$", "n": r"$n$", "em": r"$e^{-}$", "ep": r"$e^{+}$",
+    "ph": r"$\gamma$", "pbar": r"$\bar{p}$", "nbar": r"$\bar{n}$",
 }
 
 # default model location (under resources/)
@@ -688,15 +691,16 @@ def select_events(source, e_had=None, n=100, n_bins=12, top_k=10, rng=None):
 
 def _erange_label(erange, requested=None):
     lo, hi = erange
-    s = rf"$E_{{\mathrm{{had}}}}\in$[{lo:.0f}, {hi:.0f}] GeV"
-    return s + (rf"  (req {requested:.0f})" if requested is not None else "")
+    s1 = rf"$E_{{\mathrm{{had}}}}$"
+    s2 = rf"$\in$[{lo:.0f}, {hi:.0f}] GeV"
+    return s1 + (rf"={requested:.0f}" if requested is not None else "") + s2
 
 
 def plot_event_fluctuation(model, source=None, e_had=None, final_state=None, n=100,
                            n_bins=12, top_k=10, rng=None, seed=0, color="#4c78a8",
-                           xlim=(0, 1700), ax=None, save=None, show=False):
-    """(a) Sample ONE event's composite n times -> the MODEL's own spread for a FIXED
-    final state (a narrow band = sampler noise). Normalized.
+                           xlim=(0, 1500), ax=None, save=None, show=False):
+    """Sample ONE event's composite n times -> the MODEL's own spread for a FIXED
+    final state. Normalized.
 
     Provide either `final_state` directly, or `source` + `e_had`: one event is then
     drawn at random from the E_had bin containing e_had."""
@@ -717,8 +721,8 @@ def plot_event_fluctuation(model, source=None, e_had=None, final_state=None, n=1
         z = ev.z if z is None else z
         y = _norm_curve(ev.z, ev.composite)
         Y.append(y)
-        ax.plot(ev.z, y, color=color, lw=0.4, alpha=0.25)
-    ax.plot(z, np.mean(Y, axis=0), color="#c0392b", lw=2.4, label="mean")
+        ax.plot(ev.z, y, color=color, lw=0.5, alpha=0.5)
+    ax.plot(z, np.mean(Y, axis=0), color="#c0392b", lw=2., label="mean")
     ax.set_xlim(*xlim)
     Etot = sum(E for _, E in final_state)
     ax.set_title(rf"{n} samples of one event  ($E_{{\mathrm{{had}}}}$ = {Etot:.0f} GeV)")
@@ -727,8 +731,8 @@ def plot_event_fluctuation(model, source=None, e_had=None, final_state=None, n=1
 
 
 def plot_events(model, events, rng=None, seed=0, color="#4c78a8", mean=True,
-                xlim=(0, 1700), title=None, ax=None, save=None, show=False):
-    """(b) One composite per event -> the PHYSICAL event-to-event spread. `events`
+                xlim=(0, 1500), title=None, ax=None, save=None, show=False):
+    """One composite per event -> the PHYSICAL event-to-event spread. `events`
     is a list of final states (each [(species, E), ...]). Normalized."""
     if rng is None:
         rng = np.random.default_rng(seed)
@@ -741,9 +745,9 @@ def plot_events(model, events, rng=None, seed=0, color="#4c78a8", mean=True,
         z = ev.z if z is None else z
         y = _norm_curve(ev.z, ev.composite)
         Y.append(y)
-        ax.plot(ev.z, y, color=color, lw=0.4, alpha=0.25)
+        ax.plot(ev.z, y, color=color, lw=0.5, alpha=0.5)
     if mean and Y:
-        ax.plot(z, np.mean(Y, axis=0), color="#c0392b", lw=2.4, label="mean")
+        ax.plot(z, np.mean(Y, axis=0), color="#c0392b", lw=2., label="mean")
         ax.legend()
     ax.set_xlim(*xlim)
     ax.set_title(title or f"{len(Y)} sampled event composites")
@@ -751,8 +755,8 @@ def plot_events(model, events, rng=None, seed=0, color="#4c78a8", mean=True,
 
 
 def plot_events_at_energy(model, source, e_had, n=100, n_bins=12, top_k=10, seed=0,
-                          xlim=(0, 1700), save=None, show=False):
-    """(b) Sample one composite each for n events from the E_had bin containing
+                          xlim=(0, 1500), save=None, show=False):
+    """Sample one composite each for n events from the E_had bin containing
     `e_had` (widening to neighbours if sparse). `source` is the pythia events .npz.
     The plot title shows the actual E_had range of the events used."""
     rng = np.random.default_rng(seed)
