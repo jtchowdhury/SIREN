@@ -26,8 +26,8 @@ cd "$HOME/SIREN/geant4_shower"
 
 echo "Starting build on $SLURM_CPUS_PER_TASK cores at $(date)"
 python /n/home13/jchowdhury/SIREN/geant4_shower/python_scripts/shower_gamma_model.py \
-    --g4-dir /n/home13/jchowdhury/SIREN/geant4_shower/output \
+    --g4-dir /n/home13/jchowdhury/SIREN/geant4_shower/output/data/h5 \
     --n-jobs "$SLURM_CPUS_PER_TASK" \
-    --save /n/home13/jchowdhury/SIREN/geant4_shower/output/shower_model.pkl \
+    --save /n/home13/jchowdhury/SIREN/geant4_shower/output/data/pkl/shower_model.pkl \
     --no-validate
 echo "Done at $(date)"
