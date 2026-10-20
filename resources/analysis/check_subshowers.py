@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 """
-check_subshowers.py  —  sanity-check subshower output from DISFromSpline
+check_subshowers.py  --  sanity-check the gamma_subshowers output in a SIREN
+HDF5 event file.
+
+Each interaction's hadronic blob is developed (by hadronic_showers.BlobDeveloper,
+inside _util.SaveEvents) into a flat list of gamma subshowers, stored as the
+record field `gamma_subshowers` with four parallel columns:
+
+    subshower_parent      (str)    e.g. "pi0(1)", "Kp(1)"  (m>=2 share one tag)
+    subshower_alpha       (float)  gamma shape   (> 0)
+    subshower_beta        (float)  gamma rate    (> 0)
+    subshower_amplitude   (float)  integrated light of the component  (> 0)
+
+This script flattens those across all events/interactions and checks they are
+finite, positive, and structurally sane, then prints a few summary statistics.
 
 Usage:
     python check_subshowers.py output/IceCube.hdf5
@@ -17,6 +30,7 @@ PASS = "\033[92m PASS\033[0m"
 FAIL = "\033[91m FAIL\033[0m"
 WARN = "\033[93m WARN\033[0m"
 
+
 def check(label, condition, detail=""):
     status = PASS if condition else FAIL
     msg = f"  [{status}] {label}"
@@ -24,6 +38,7 @@ def check(label, condition, detail=""):
         msg += f"  ({detail})"
     print(msg)
     return condition
+
 
 def load(path):
     with h5py.File(path, "r") as f:
@@ -35,150 +50,103 @@ def load(path):
         )
     return arr
 
-def flat(arr, key):
-    return ak.to_numpy(ak.flatten(arr[key])).astype(float)
+
+def column(arr, name):
+    """Fully flatten one gamma_subshowers column across events + interactions."""
+    return arr["gamma_subshowers"][name]
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("hdf5", help="Path to HDF5 output file")
+    parser.add_argument("hdf5", help="Path to the SIREN HDF5 output file")
     parser.add_argument("--plot", action="store_true", help="Show diagnostic plots")
     args = parser.parse_args()
 
     print(f"\nLoading {args.hdf5} ...")
     arr = load(args.hdf5)
-
-    N      = flat(arr, "subshower_N")
-    E_sub  = flat(arr, "subshower_E_sub")
-    alpha  = flat(arr, "subshower_alpha")
-    beta   = flat(arr, "subshower_beta")
-
-    # Reconstruct E_had = N * E_sub (stored per-subshower energy times count)
-    E_had  = N * E_sub
-
-    n_events = len(N)
-    print(f"Events loaded: {n_events}\n")
-
-    # ── 1. NaN / Inf checks ───────────────────────────────────────────────────
-    print("── NaN / Inf ──────────────────────────────────────────────────────────")
-    all_ok = True
-    for name, arr_ in [("subshower_N", N), ("subshower_E_sub", E_sub),
-                        ("subshower_alpha", alpha), ("subshower_beta", beta)]:
-        n_nan = np.sum(np.isnan(arr_))
-        n_inf = np.sum(np.isinf(arr_))
-        ok = (n_nan == 0) and (n_inf == 0)
-        all_ok &= check(f"{name}: no NaN/Inf",
-                        ok, f"{n_nan} NaN, {n_inf} Inf")
-
-    if not all_ok:
-        print("\nCritical NaN/Inf found — fix before proceeding.\n")
+    if "gamma_subshowers" not in arr.fields:
+        print("  no 'gamma_subshowers' field in this file -- was it written with "
+              "develop_blobs=True?")
         sys.exit(1)
 
-    # ── 2. Range checks ───────────────────────────────────────────────────────
-    print("\n── Range checks ───────────────────────────────────────────────────────")
-    check("subshower_N >= 1 always",
-          np.all(N >= 1),
-          f"min={N.min():.0f}")
+    # per-interaction subshower counts, and flat columns over ALL subshowers
+    n_per_int = ak.to_numpy(ak.flatten(ak.num(column(arr, "subshower_alpha"), axis=2)))
+    alpha  = ak.to_numpy(ak.flatten(column(arr, "subshower_alpha"),     axis=None)).astype(float)
+    beta   = ak.to_numpy(ak.flatten(column(arr, "subshower_beta"),      axis=None)).astype(float)
+    amp    = ak.to_numpy(ak.flatten(column(arr, "subshower_amplitude"), axis=None)).astype(float)
+    parent = ak.to_list(ak.flatten(column(arr, "subshower_parent"),     axis=None))
 
-    check("subshower_N is integer-valued",
-          np.all(np.abs(N - np.round(N)) < 0.5),
-          f"max deviation={np.max(np.abs(N - np.round(N))):.2e}")
+    n_events = len(arr)
+    n_int    = len(n_per_int)
+    n_sub    = len(alpha)
+    print(f"Events: {n_events}   interactions: {n_int}   gamma subshowers: {n_sub}\n")
 
-    check("subshower_alpha > 0 always",
-          np.all(alpha > 0),
-          f"min={alpha.min():.3f}")
+    if n_sub == 0:
+        print("  no gamma subshowers were produced -- check the model/pythia store "
+              "paths and that interactions carry a Hadrons blob.")
+        sys.exit(1)
 
-    check("subshower_beta ~ 0.9 (constant)",
-          np.allclose(beta, 0.9, atol=1e-6),
-          f"mean={beta.mean():.4f}, std={beta.std():.2e}")
+    # -- 1. NaN / Inf --------------------------------------------------------
+    print("-- NaN / Inf -----------------------------------------------------------")
+    ok = True
+    for name, a in [("subshower_alpha", alpha), ("subshower_beta", beta),
+                    ("subshower_amplitude", amp)]:
+        n_nan, n_inf = int(np.sum(np.isnan(a))), int(np.sum(np.isinf(a)))
+        ok &= check(f"{name}: no NaN/Inf", (n_nan == 0 and n_inf == 0),
+                    f"{n_nan} NaN, {n_inf} Inf")
+    if not ok:
+        print("\nCritical NaN/Inf found -- fix before proceeding.\n")
+        sys.exit(1)
 
-    check("subshower_E_sub <= 1.0 GeV + rounding",
-          np.all(E_sub <= 1.05),   # 5% tolerance for rounding
-          f"max={E_sub.max():.4f} GeV")
+    # -- 2. Positivity / structure ------------------------------------------
+    print("\n-- Positivity & structure ---------------------------------------------")
+    check("subshower_alpha > 0",     np.all(alpha > 0), f"min={alpha.min():.3g}")
+    check("subshower_beta  > 0",     np.all(beta  > 0), f"min={beta.min():.3g}")
+    check("subshower_amplitude > 0", np.all(amp   > 0), f"min={amp.min():.3g}")
+    check("every parent tag is a non-empty string",
+          all(isinstance(p, str) and len(p) > 0 for p in parent))
+    check(">=1 subshower per interaction",
+          np.all(n_per_int >= 1),
+          f"{int(np.sum(n_per_int < 1))} interactions with 0")
 
-    check("subshower_E_sub > 0",
-          np.all(E_sub > 0),
-          f"min={E_sub.min():.4f} GeV")
+    # -- 3. Summary stats (informational) -----------------------------------
+    print("\n-- Summary -------------------------------------------------------------")
+    print(f"  subshowers / interaction : mean {n_per_int.mean():.2f}  "
+          f"min {n_per_int.min()}  max {n_per_int.max()}")
+    # species = parent tag with the "(k)" instance index stripped
+    species = [p.split("(")[0] for p in parent]
+    uniq, counts = np.unique(species, return_counts=True)
+    order = np.argsort(-counts)
+    print("  subshowers by parent species:")
+    for i in order:
+        print(f"      {uniq[i]:6s} {counts[i]:8d}  ({100*counts[i]/n_sub:5.2f}%)")
+    # fraction of parent instances that were multi-component (m>=2)
+    import collections
+    per_instance = collections.Counter(parent)
+    m_ge2 = sum(1 for c in per_instance.values() if c >= 2)
+    print(f"  parent instances: {len(per_instance)}  "
+          f"({m_ge2} with m>=2, {100*m_ge2/max(len(per_instance),1):.1f}%)")
+    print(f"  alpha  : [{alpha.min():.2f}, {alpha.max():.2f}]  median {np.median(alpha):.2f}")
+    print(f"  beta   : [{beta.min():.4f}, {beta.max():.4f}]  median {np.median(beta):.4f}")
+    print(f"  amplitude: [{amp.min():.3g}, {amp.max():.3g}]  median {np.median(amp):.3g}")
 
-    # ── 3. Internal consistency ───────────────────────────────────────────────
-    print("\n── Internal consistency ───────────────────────────────────────────────")
-
-    # alpha should equal 0.3 + 0.7 * ln(E_had / 0.2)
-    E_c = 0.2
-    alpha_expected = 0.3 + 0.7 * np.log(E_had / E_c)
-    alpha_residual = np.abs(alpha - alpha_expected)
-    check("alpha == 0.3 + 0.7*ln(E_had/0.2)",
-          np.all(alpha_residual < 1e-6),
-          f"max residual={alpha_residual.max():.2e}")
-
-    # N should equal round(E_had / 1.0), i.e. round(E_had)
-    N_expected = np.maximum(1, np.round(E_had / 1.0))
-    check("N == max(1, round(E_had / E_sub_threshold))",
-          np.all(np.abs(N - N_expected) < 0.5),
-          f"mismatches={(np.abs(N - N_expected) >= 0.5).sum()}")
-
-    # ── 4. Physical plausibility ──────────────────────────────────────────────
-    print("\n── Physical plausibility ──────────────────────────────────────────────")
-    print(f"  subshower_N   : min={N.min():.0f}  median={np.median(N):.0f}"
-          f"  max={N.max():.0f}")
-    print(f"  E_had (GeV)   : min={E_had.min():.2f}  median={np.median(E_had):.2f}"
-          f"  max={E_had.max():.2f}")
-    print(f"  subshower_alpha: min={alpha.min():.3f}  median={np.median(alpha):.3f}"
-          f"  max={alpha.max():.3f}")
-    print(f"  subshower_beta : {beta.mean():.4f} (constant by construction)")
-    print(f"  subshower_E_sub: min={E_sub.min():.4f}  max={E_sub.max():.4f} GeV")
-
-    # Warn if very low alpha (gamma_p_inv becomes numerically tricky near 0)
-    n_low_alpha = np.sum(alpha < 1.0)
-    if n_low_alpha > 0:
-        print(f"{WARN}  {n_low_alpha} events have alpha < 1.0 — "
-              f"gamma_p_inv quantiles may be inaccurate at low shape values")
-
-    # ── 5. Optional plots ─────────────────────────────────────────────────────
     if args.plot:
-        try:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-        except ImportError:
-            print("\nmatplotlib not available — skipping plots")
-            return
-
-        fig, axes = plt.subplots(2, 2, figsize=(10, 8))
-        fig.suptitle("Subshower sanity check", fontsize=13)
-
-        axes[0, 0].hist(np.log10(N), bins=60, color="steelblue", edgecolor="none")
-        axes[0, 0].set_xlabel("log10(subshower_N)")
-        axes[0, 0].set_ylabel("Events")
-        axes[0, 0].set_title("Number of sub-showers")
-
-        axes[0, 1].hist(alpha, bins=60, color="darkorange", edgecolor="none")
-        axes[0, 1].set_xlabel("subshower_alpha")
-        axes[0, 1].set_title("Gamma shape parameter α")
-
-        axes[1, 0].hist(E_sub, bins=60, color="seagreen", edgecolor="none")
-        axes[1, 0].set_xlabel("subshower_E_sub (GeV)")
-        axes[1, 0].set_title("Energy per sub-shower")
-
-        # alpha vs log10(E_had): should be linear
-        sample = np.random.choice(len(E_had), min(5000, len(E_had)), replace=False)
-        axes[1, 1].scatter(np.log10(E_had[sample]), alpha[sample],
-                           s=1, alpha=0.3, color="purple")
-        log_E_range = np.linspace(np.log10(E_had.min()), np.log10(E_had.max()), 100)
-        E_range = 10 ** log_E_range
-        axes[1, 1].plot(log_E_range,
-                        0.3 + 0.7 * np.log(E_range / E_c),
-                        "r-", lw=1.5, label="expected")
-        axes[1, 1].set_xlabel("log10(E_had / GeV)")
-        axes[1, 1].set_ylabel("alpha")
-        axes[1, 1].set_title("α vs E_had (should be linear)")
-        axes[1, 1].legend(fontsize=8)
-
-        out = args.hdf5.replace(".hdf5", "_subshower_check.png")
-        plt.tight_layout()
-        plt.savefig(out, dpi=150)
-        print(f"\n  Plot saved to {out}")
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(2, 2, figsize=(10, 8))
+        ax[0, 0].hist(alpha, bins=50); ax[0, 0].set_title("alpha"); ax[0, 0].set_yscale("log")
+        ax[0, 1].hist(beta, bins=50);  ax[0, 1].set_title("beta");  ax[0, 1].set_yscale("log")
+        ax[1, 0].hist(np.log10(amp), bins=50); ax[1, 0].set_title("log10(amplitude)")
+        ax[1, 1].hist(n_per_int, bins=range(0, n_per_int.max() + 2))
+        ax[1, 1].set_title("subshowers / interaction")
+        fig.tight_layout()
+        out = args.hdf5.rsplit(".", 1)[0] + "_gamma_subshowers.png"
+        fig.savefig(out, dpi=150)
+        print(f"\n  wrote {out}")
 
     print("\nDone.\n")
+
 
 if __name__ == "__main__":
     main()

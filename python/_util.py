@@ -942,11 +942,29 @@ def SaveEvents(events,
                save_parquet=True,
                save_siren_events=True,
                fid_vol=None,
-               output_filename=None):
+               output_filename=None,
+               develop_blobs=True,
+               shower_model_path=None,
+               pythia_events_path=None):
 
 
     # Optionally save things
     if save_siren_events: _dataclasses.SaveInteractionTrees(events, output_filename)
+
+    # Interim hadronic-blob developer: turn each Hadrons blob's E_had (plus the
+    # scattered electron in CC nu_e) into gamma subshowers. Loaded ONCE. If the
+    # shower model / PYTHIA store aren't available, this disables gracefully and
+    # gamma_subshowers are written empty.
+    _blobdev = None
+    if develop_blobs:
+        try:
+            from . import hadronic_showers as _hs
+            _blobdev = _hs.BlobDeveloper(model=shower_model_path,
+                                         pythia_source=pythia_events_path)
+        except Exception as _e:
+            print(f"  (gamma_subshowers disabled: {_e})")
+    _HADRONS_PDG = -2000001006        # SIREN 'Hadrons' pseudo-particle PDG code
+    _blob_rng = np.random.default_rng()
     # A dictionary containing each dataset we'd like to save
     datasets = {
         "event_weight":[], # weight of entire event
@@ -962,10 +980,11 @@ def SaveEvents(events,
         "primary_momentum":[], # primary momentum of each interaction
         "secondary_momenta":[], # secondary momentum of each interaction
         "parent_idx":[], # index of the parent interaction
-        "subshower_N":[],     # number of sub-showers per interaction
-        "subshower_E_sub":[], # energy per sub-shower [GeV]
-        "subshower_alpha":[], # gamma distribution shape parameter
-        "subshower_beta":[],  # gamma distribution rate parameter
+        # per interaction: the sampled gamma subshowers of the hadronic blob,
+        # a record with parallel columns
+        #   subshower_parent[] (str), subshower_alpha[], subshower_beta[],
+        #   subshower_amplitude[]  (= N * w of each gamma component)
+        "gamma_subshowers":[],
     }
     for ie, event in enumerate(events):
         print("Saving Event %d/%d  " % (ie, len(events)), end="\r")
@@ -983,10 +1002,7 @@ def SaveEvents(events,
                   "primary_momentum",
                   "secondary_momenta",
                   "parent_idx",
-                  "subshower_N",
-                  "subshower_E_sub",
-                  "subshower_alpha",
-                  "subshower_beta"]:
+                  "gamma_subshowers"]:
             datasets[k].append([])
         # loop over interactions
         for id, datum in enumerate(event.tree):
@@ -1026,12 +1042,25 @@ def SaveEvents(events,
                 datasets["secondary_momenta"][-1][-1].append(np.array(sec_momenta,dtype=float))
             datasets["num_secondaries"][-1].append(isec+1)
 
-            # subshower parameters set by DISFromSpline::SampleFinalState in C++
-            iparams = datum.record.interaction_parameters
-            datasets["subshower_N"][-1].append(iparams.get("subshower_N", float("nan")))
-            datasets["subshower_E_sub"][-1].append(iparams.get("subshower_E_sub", float("nan")))
-            datasets["subshower_alpha"][-1].append(iparams.get("subshower_alpha", float("nan")))
-            datasets["subshower_beta"][-1].append(iparams.get("subshower_beta", float("nan")))
+            # gamma subshowers: develop the hadronic blob (E_had from the Hadrons
+            # secondary) and, for CC nu_e, the scattered electron, into gamma
+            # components. Flattened across all particles; parents share a tag for m>=2.
+            gs = {"subshower_parent": [], "subshower_alpha": [],
+                  "subshower_beta": [], "subshower_amplitude": []}
+            if _blobdev is not None:
+                E_had = None
+                lepton = None
+                for _st, _mom in zip(datum.record.signature.secondary_types,
+                                     datum.record.secondary_momenta):
+                    _pdg = int(_st)
+                    if _pdg == _HADRONS_PDG:
+                        E_had = float(_mom[0])          # energy component of the 4-momentum
+                    elif abs(_pdg) == 11:               # scattered electron -> EM shower
+                        lepton = ("em", float(_mom[0]))
+                    # muon/tau/neutrino leptons are tracks/invisible -> not showered
+                if E_had is not None and E_had > 0:
+                    gs = _blobdev.develop(E_had, rng=_blob_rng, lepton=lepton)
+            datasets["gamma_subshowers"][-1].append(gs)
 
         datasets["num_interactions"].append(id+1)
 
@@ -1042,15 +1071,6 @@ def SaveEvents(events,
         group = fout.create_group("Events")
         form, length, container = ak.to_buffers(ak.to_packed(ak_array), container=group)
         group.attrs["form"] = form.to_json()
-        group.attrs["length"] = length
-        fout.close()
-    if save_parquet:
-        ak.to_parquet(ak_array,output_filename+".parquet")
-
-# Load events from the custom SIREN event format
-def LoadEvents(filename):
-    return _dataclasses.LoadInteractionTrees(filename)
-p.attrs["form"] = form.to_json()
         group.attrs["length"] = length
         fout.close()
     if save_parquet:

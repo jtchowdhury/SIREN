@@ -67,6 +67,10 @@ DEFAULT_MODEL = os.path.join(
     _HERE, "..", "resources", "showers",
     "GammaShowerModel-v1.0", "shower_model.npz",
 )
+DEFAULT_PYTHIA = os.path.join(
+    _HERE, "..", "resources", "showers",
+    "GammaShowerModel-v1.0", "pythia_events_nue.npz",
+)
 
 _trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
 
@@ -644,9 +648,10 @@ def top_k_final_state(pids, energies, e_had, top_k=10, rng=None):
     return fs
 
 
-def _read_event_store(path):
+def _read_event_store(path=None):
     """Load the PYTHIA events store: a .npz (from pythia_events_to_npz.py) with
     arrays E_had, top20_pids, top20_energies. Numpy-only -- no h5py at run time."""
+    path = path or DEFAULT_PYTHIA
     if not str(path).endswith(".npz"):
         raise ValueError("event store must be the .npz built by pythia_events_to_npz.py")
     d = np.load(path, allow_pickle=False)
@@ -765,3 +770,81 @@ def plot_events_at_energy(model, source, e_had, n=100, n_bins=12, top_k=10, seed
     title = f"{len(events)} event composites,  " + _erange_label(er, e_had)
     return plot_events(model, events, rng=rng, xlim=xlim, title=title,
                        save=save, show=show)
+
+
+# ---------------------------------------------------------------------------
+#  SIREN hadronic-blob developer (interim, pre siren-pythia interface)
+# ---------------------------------------------------------------------------
+class BlobDeveloper:
+    """Develop a SIREN hadronic blob of energy E_had into gamma subshowers.
+
+    Given E_had, it picks ONE representative final state from the PYTHIA events
+    store (the event whose total hadronic energy lands in E_had's log bin),
+    rescales that final state so its hadron energies sum exactly to E_had, then
+    samples an m-gamma shower for each hadron and flattens every component into a
+    flat list of gamma subshowers:
+
+        subshower_parent    (str)    e.g. "pi0(1)", "Kp(1)"  (m>=2 share one tag)
+        subshower_alpha     (float)  gamma shape
+        subshower_beta      (float)  gamma rate
+        subshower_amplitude (float)  integrated light of the component (N * w_i)
+
+    A subshower's position is NOT stored -- it is implied by (alpha, beta) and the
+    interaction vertex/direction. Pass `lepton=(species, energy)` to also shower
+    the scattered lepton (e.g. ("em", E_e) for CC nu_e); pass None for a muon
+    (a track, not showered) or for NC (no charged lepton).
+
+    The model and the PYTHIA store are loaded ONCE at construction, so develop()
+    is cheap to call per interaction."""
+
+    def __init__(self, model=None, pythia_source=None, n_bins=12, top_k=10):
+        self.model = model if hasattr(model, "sample") else load_model(model)
+        self.EH, self.PD, self.EN = _read_event_store(pythia_source)
+        self.n_bins = int(n_bins)
+        self.top_k = int(top_k)
+        self.edges = event_bins(self.EH, self.n_bins)
+        self.which = np.clip(np.digitize(self.EH, self.edges) - 1, 0, self.n_bins - 1)
+
+    def _pick_final_state(self, E_had, rng):
+        """One energy-conserving final state scaled so its hadrons sum to E_had."""
+        b = int(np.clip(np.digitize([E_had], self.edges)[0] - 1, 0, self.n_bins - 1))
+        pool = []
+        for k in sorted(range(self.n_bins), key=lambda kk: abs(kk - b)):
+            idx = np.where(self.which == k)[0]
+            if len(idx):
+                pool = idx
+                break
+        i = int(rng.choice(pool))
+        fs = top_k_final_state(self.PD[i], self.EN[i], self.EH[i], self.top_k, rng)
+        scale = (E_had / self.EH[i]) if self.EH[i] > 0 else 1.0   # conserve the blob energy
+        return [(sp, E * scale) for sp, E in fs]
+
+    def develop(self, E_had, rng=None, lepton=None):
+        """Return the gamma subshowers of one blob as a dict of 4 parallel columns."""
+        rng = rng or np.random.default_rng()
+        particles = self._pick_final_state(float(E_had), rng)
+        if lepton is not None and self.model.has(lepton[0]):
+            particles.append((lepton[0], float(lepton[1])))
+        parent, alpha, beta, amp = [], [], [], []
+        counts = {}
+        for sp, E in particles:
+            if not self.model.has(sp):
+                continue
+            counts[sp] = counts.get(sp, 0) + 1
+            tag = f"{sp}({counts[sp]})"                 # m>=2 components share this tag
+            sh = self.model.sample(sp, E, rng)
+            for i in range(sh.m):
+                parent.append(tag)
+                alpha.append(float(sh.alpha[i]))
+                beta.append(float(sh.beta[i]))
+                amp.append(float(sh.N * sh.weights[i]))
+        return {"subshower_parent": parent, "subshower_alpha": alpha,
+                "subshower_beta": beta, "subshower_amplitude": amp}
+
+
+def develop_blob(E_had, model=None, pythia_source=None, rng=None, lepton=None,
+                 top_k=10):
+    """One-off convenience: develop a single blob (loads the model + store each
+    call -- for many blobs build a BlobDeveloper once and reuse it)."""
+    dev = BlobDeveloper(model=model, pythia_source=pythia_source, top_k=top_k)
+    return dev.develop(E_had, rng=rng, lepton=lepton)
