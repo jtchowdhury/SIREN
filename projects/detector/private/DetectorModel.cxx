@@ -1,6 +1,7 @@
 #include "SIREN/detector/DetectorModel.h"
 
 #include <mutex>
+#include <atomic>
 #include <tuple>
 #include <cmath>
 #include <cctype>
@@ -923,7 +924,7 @@ double DetectorModel::GetInteractionDensity(Geometry::IntersectionList const & i
             std::vector<double> const & total_cross_sections,
             double const & total_decay_length) const {
     Vector3D direction = p0 - intersections.position;
-    if(direction.magnitude() == 0) {
+    if(direction.magnitude() <= distance_threshold) {
         direction = intersections.direction;
     } else {
         direction.normalize();
@@ -1220,6 +1221,7 @@ double DetectorModel::GetInteractionDepthInCGS(Geometry::IntersectionList const 
         std::vector<siren::dataclasses::ParticleType> const & targets,
         std::vector<double> const & total_cross_sections,
         double const & total_decay_length) const {
+
     if(p0 == p1) {
         return 0.0;
     }
@@ -1232,8 +1234,8 @@ double DetectorModel::GetInteractionDepthInCGS(Geometry::IntersectionList const 
     if(targets.empty()) {
       return distance / total_decay_length; // m / m --> dimensionless
     }
-    if(distance == 0.0) {
-        return 0.0;
+    if(distance <= distance_threshold) {
+        return distance / total_decay_length;
     }
     direction.normalize();
 
@@ -1903,9 +1905,15 @@ void DetectorModel::SectorLoop(std::function<bool(std::vector<Geometry::Intersec
                 // since this intersection does not represent a physical transition to a different sector
             }
             else {
-                // If we are exiting a sector with larger hierarchy the current_intersection should have been set to match that sector.
-                // Thus, we would not reach this point.
-                throw(std::runtime_error("Cannot exit a level that we have not entered!"));
+                // We have exited a hierarchy we never entered!
+                // Skip this exit intersection and warn
+                // This is likely an issue with the geometry intersection calculation
+                static std::atomic<bool> parity_warning_issued{false};
+                if(!parity_warning_issued.exchange(true)) {
+                    std::cerr << "SIREN DetectorModel::SectorLoop: ignoring an exit intersection for hierarchy "
+                              << intersection->hierarchy << " with no matching entry "
+                              << "(geometry seam artifact); further occurrences are silent." << std::endl;
+                }
             }
         }
     }
@@ -1937,9 +1945,6 @@ double DetectorModel::DistanceForInteractionDepthFromPoint(Geometry::Intersectio
         dot = 1;
     }
 
-    // Recast decay length to cm for density integral
-    double total_decay_length_cm = total_decay_length / siren::utilities::Constants::cm;
-
     double total_interaction_depth = 0.0;
     double total_distance = 0.0;
     std::function<bool(std::vector<Geometry::Intersection>::const_iterator, std::vector<Geometry::Intersection>::const_iterator, double)> callback =
@@ -1953,31 +1958,61 @@ double DetectorModel::DistanceForInteractionDepthFromPoint(Geometry::Intersectio
             double segment_length = end_point - start_point;
             DetectorSector sector = GetSector(current_intersection->hierarchy);
             double target = interaction_depth - total_interaction_depth;
-            // This next line is because when we evaluate the density integral,
-            // we end up calculating an interaction length in units of m/cm.
-            // This is a correction
+            // Unit bookkeeping:
+            //   density integrals along the ray are in g cm^-3 m,
+            //   and the target composition below is in cm^2 g^-1,
+            //   so a dimensionless interaction depth is depth = 100 * composition * integral
+            //   with the factor of 100 converting the integral's meters to centimeters.
+            //   Dividing the remaining depth by 100 here and by the composition below converts it
+            //   into the g cm^-3 m quantity that the density distribution's InverseIntegral solves for.
             target /= 100;
             std::vector<double> interaction_depths = materials_.GetTargetParticleFraction(sector.material_id, targets.begin(), targets.end());
             for(unsigned int i=0; i<targets.size(); ++i) {
                 interaction_depths[i] *= total_cross_sections[i];
             }
             double target_composition = accumulate(interaction_depths.begin(), interaction_depths.end(), 0.0); // cm^2 g^-1
-            target /= target_composition;
-            double distance;
-            // total_decay_length now in cm
-            if (total_decay_length < std::numeric_limits<double>::infinity()) {
-              distance = sector.density->InverseIntegral(p0+start_point*direction, direction, 1./(total_decay_length_cm*target_composition), target, segment_length);
-            }
-            else {
-              distance = sector.density->InverseIntegral(p0+start_point*direction, direction, target, segment_length);
+            double distance = -1.0;
+            if(target_composition > 0.0) {
+                target /= target_composition;
+                if(std::isfinite(total_decay_length)) {
+                    // The decay hazard adds interaction depth at a rate of 1 / decay_length per meter of path.
+                    // target is expressed in g cm^-3 m (divided by 100 and by the composition above),
+                    // so the decay rate must be divided by the same 100 * composition for InverseIntegral to
+                    // invert the combined scattering-plus-decay depth in one consistent unit.
+                    double decay_constant = 1.0
+                        / (100.0 * total_decay_length * target_composition);
+                    distance = sector.density->InverseIntegral(
+                        p0 + start_point * direction, direction,
+                        decay_constant, target, segment_length);
+                } else {
+                    distance = sector.density->InverseIntegral(
+                        p0 + start_point * direction, direction,
+                        target, segment_length);
+                }
+            } else if(std::isfinite(total_decay_length)) {
+                // None of the requested targets exist in this material (for example a vacuum sector,
+                // or an exotic particle whose targets no material contains), so depth grows purely by
+                // decay, linearly at 1 / decay_length per meter, and the crossing point has a closed form.
+                // A solution beyond the segment end means the depth is reached in a later sector.
+                distance = (interaction_depth - total_interaction_depth)
+                    * total_decay_length;
+                if(distance > segment_length) {
+                    distance = -1.0;
+                }
             }
             done = distance >= 0;
-            double integral = sector.density->Integral(p0+start_point*direction, direction, segment_length); // g cm^-3 * m
-            integral *= (target_composition*siren::utilities::Constants::m/siren::utilities::Constants::cm); // --> m cm^-1 --> dimensionless
-            total_interaction_depth += integral;
             if(done) {
                 total_distance = start_point + distance;
             } else {
+                // The segment was fully traversed: count everything it consumed against the remaining depth,
+                // both the scattering integral and the decay hazard.
+                // This accumulation must mirror GetInteractionDepthInCGS exactly.
+                double integral = sector.density->Integral(p0+start_point*direction, direction, segment_length); // g cm^-3 * m
+                integral *= (target_composition*siren::utilities::Constants::m/siren::utilities::Constants::cm); // --> m cm^-1 --> dimensionless
+                total_interaction_depth += integral;
+                if(std::isfinite(total_decay_length)) {
+                    total_interaction_depth += segment_length / total_decay_length;
+                }
                 total_distance = start_point + segment_length;
             }
         }
@@ -2212,7 +2247,7 @@ void DetectorModel::LoadConcentricShellsFromLegacyFile(std::string model_fname, 
     double radius, param;
     int nparams;
 
-    int level = -sectors_.size();
+    int level = -static_cast<int>(sectors_.size());
     double max_radius = 0;
     while(getline(in,buf)) {
         {
@@ -2285,14 +2320,17 @@ void DetectorModel::LoadConcentricShellsFromLegacyFile(std::string model_fname, 
         saw_ice |= in_ice;
 
         if(not saw_ice) {
-            // In the Earth, keep increasing the radius
-            if(solid)
-                earth_radius = ((Sphere *)(sector.geo.get()))->GetRadius();
+            if(solid) {
+                auto const * sp = dynamic_cast<Sphere const *>(sector.geo.get());
+                if(sp) earth_radius = sp->GetRadius();
+            }
         }
         else if(in_ice) {
-            // In the ice, keep increasing the radius
-            ice_radius = ((Sphere *)(sector.geo.get()))->GetRadius();
-            ice_layers.push_back(i);
+            auto const * sp = dynamic_cast<Sphere const *>(sector.geo.get());
+            if(sp) {
+                ice_radius = sp->GetRadius();
+                ice_layers.push_back(i);
+            }
         }
         else {
             // Out of the ice, stop counting layers
@@ -2348,4 +2386,3 @@ double DetectorModel::GetTargetMass(siren::dataclasses::ParticleType target) con
 }
 
 CEREAL_REGISTER_DYNAMIC_INIT(siren_DetectorModel);
-

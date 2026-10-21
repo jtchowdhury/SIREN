@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import http.server
+import io
 import os
+import tarfile
 import threading
 import zipfile
 from pathlib import Path
@@ -46,6 +48,29 @@ def sample_zip(tmp):
         zf.writestr("data/beta/file1.txt", "beta-1")
         zf.writestr("data/beta/sub/deep.txt", "beta-deep")
     return zip_path
+
+
+@pytest.fixture()
+def sample_tar_xz(tmp):
+    """Create an xz-compressed tar archive with a nested data tree."""
+    source = tmp / "tar_source"
+    files = {
+        "data/alpha/file1.txt": "alpha-1",
+        "data/alpha/file2.txt": "alpha-2",
+        "data/beta/file1.txt": "beta-1",
+        "data/beta/sub/deep.txt": "beta-deep",
+    }
+    for rel_path, content in files.items():
+        path = source / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    archive = tmp / "archive.tar.xz"
+    with tarfile.open(archive, "w:xz") as tf:
+        for path in sorted(source.rglob("*")):
+            if path.is_file():
+                tf.add(path, arcname=path.relative_to(source))
+    return archive
 
 
 class _LocalServer:
@@ -167,6 +192,87 @@ class TestEnsureFiles:
         ])
         assert existing.read_text() == "old"
         assert (tmp / "new.txt").read_text() == "new"
+
+
+# ======================================================================
+# ensure_tar_archive
+# ======================================================================
+
+class TestEnsureTarArchive:
+
+    def test_downloads_verifies_and_extracts(self, local_server, sample_tar_xz,
+                                             tmp):
+        srv, _ = local_server
+        sha = hashlib.sha256(sample_tar_xz.read_bytes()).hexdigest()
+        dest = tmp / "generic_extract"
+
+        dl.ensure_tar_archive(
+            f"{srv.url}/{sample_tar_xz.name}", sample_tar_xz.name,
+            str(dest), sha)
+
+        assert (dest / "data" / "alpha" / "file1.txt").read_text() == "alpha-1"
+        cached = list((dest / ".download_cache").glob(f"{sha}.*"))
+        assert len(cached) == 1
+        sentinels = list(dest.glob(f".*{dl._ARCHIVE_EXTRACTED_SENTINEL}"))
+        assert len(sentinels) == 1
+        assert f"sha256:{sha}" in sentinels[0].read_text()
+
+    def test_sentinel_skips_second_download(self, local_server, sample_tar_xz,
+                                            tmp, monkeypatch):
+        srv, _ = local_server
+        sha = hashlib.sha256(sample_tar_xz.read_bytes()).hexdigest()
+        dest = tmp / "generic_cached"
+        url = f"{srv.url}/{sample_tar_xz.name}"
+
+        dl.ensure_tar_archive(url, sample_tar_xz.name, str(dest), sha)
+        monkeypatch.setattr(
+            dl, "download_file",
+            lambda *a, **kw: pytest.fail("archive was downloaded twice"))
+        dl.ensure_tar_archive(url, sample_tar_xz.name, str(dest), sha)
+
+    def test_bad_sha_does_not_extract(self, local_server, sample_tar_xz, tmp):
+        srv, _ = local_server
+        dest = tmp / "generic_bad_sha"
+
+        with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
+            dl.ensure_tar_archive(
+                f"{srv.url}/{sample_tar_xz.name}", sample_tar_xz.name,
+                str(dest), "0" * 64)
+
+        assert not (dest / "data").exists()
+        assert not list(dest.glob(f".*{dl._ARCHIVE_EXTRACTED_SENTINEL}"))
+
+    def test_path_traversal_rejected_before_extract(self, local_server, tmp):
+        srv, serve_dir = local_server
+        archive = serve_dir / "generic_evil.tar.xz"
+        content = b"pwned"
+        with tarfile.open(archive, "w:xz") as tf:
+            member = tarfile.TarInfo("../../../escaped.txt")
+            member.size = len(content)
+            tf.addfile(member, io.BytesIO(content))
+        sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+        dest = tmp / "generic_tar_slip"
+
+        with pytest.raises(ValueError, match="outside"):
+            dl.ensure_tar_archive(
+                f"{srv.url}/{archive.name}", archive.name, str(dest), sha)
+
+        assert not (tmp.parent / "escaped.txt").exists()
+
+    def test_links_are_rejected(self, local_server, tmp):
+        srv, serve_dir = local_server
+        archive = serve_dir / "generic_link.tar.xz"
+        with tarfile.open(archive, "w:xz") as tf:
+            member = tarfile.TarInfo("link")
+            member.type = tarfile.SYMTYPE
+            member.linkname = "target"
+            tf.addfile(member)
+        sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+
+        with pytest.raises(ValueError, match="links are not allowed"):
+            dl.ensure_tar_archive(
+                f"{srv.url}/{archive.name}", archive.name,
+                str(tmp / "generic_link"), sha)
 
 
 # ======================================================================
@@ -339,3 +445,101 @@ class TestSha256File:
             hashlib.sha256(b"").digest()
         ).rstrip(b"=").decode("ascii")
         assert dl._sha256_file(str(path)) == expected
+
+
+class TestResolveDataPath:
+    """resolve_data_path prefers an existing install-dir copy, else the download dir."""
+
+    def test_prefers_install_dir_when_present(self, tmp):
+        install = tmp / "install"
+        download = tmp / "download"
+        install.mkdir()
+        download.mkdir()
+        (install / "f.dat").write_bytes(b"x")
+        # Present in install_dir -> returned directly (no redundant download)
+        assert dl.resolve_data_path(str(install), str(download), "f.dat") == str(install / "f.dat")
+
+    def test_falls_back_to_download_dir_when_missing(self, tmp):
+        install = tmp / "install"
+        download = tmp / "download"
+        install.mkdir()
+        download.mkdir()
+        # Absent from install_dir -> returns the download_dir path (regardless of existence there)
+        assert dl.resolve_data_path(str(install), str(download), "missing.dat") == str(download / "missing.dat")
+
+
+# ======================================================================
+# atomic_output_path
+# ======================================================================
+
+class TestAtomicOutputPath:
+    """Concurrent writers must not share a temp filename.
+
+    Regression guard for a real failure: several processes calling
+    siren.load_detector() against a cold cache each wrote the composite GDML
+    through a fixed '<dest>.tmp' name. The first to rename pulled the file out
+    from under the rest, and most of them died with FileNotFoundError.
+    """
+
+    def test_writes_and_renames(self, tmp):
+        dest = tmp / "out.dat"
+        with dl.atomic_output_path(str(dest)) as t:
+            Path(t).write_text("payload")
+            assert not dest.exists(), "must not publish before the rename"
+        assert dest.read_text() == "payload"
+
+    def test_creates_missing_parent_directory(self, tmp):
+        dest = tmp / "nested" / "deeper" / "out.dat"
+        with dl.atomic_output_path(str(dest)) as t:
+            Path(t).write_text("x")
+        assert dest.read_text() == "x"
+
+    def test_error_leaves_dest_untouched_and_cleans_up(self, tmp):
+        dest = tmp / "out.dat"
+        dest.write_text("original")
+        with pytest.raises(RuntimeError):
+            with dl.atomic_output_path(str(dest)) as t:
+                Path(t).write_text("half written")
+                raise RuntimeError("boom")
+        assert dest.read_text() == "original"
+        assert list(tmp.iterdir()) == [dest], "temp file must be cleaned up"
+
+    def test_temp_name_is_unique_per_call(self, tmp):
+        dest = tmp / "out.dat"
+        with dl.atomic_output_path(str(dest)) as a:
+            with dl.atomic_output_path(str(dest)) as b:
+                assert a != b, "overlapping writers must not share a temp name"
+                Path(a).write_text("a")
+                Path(b).write_text("b")
+        assert dest.exists()
+
+    def test_concurrent_writers_all_succeed(self, tmp):
+        """Every writer completes and the destination holds one intact payload."""
+        dest = tmp / "composite.gdml"
+        nwriters = 12
+        # Large enough that writers are still writing while others rename.
+        def payload(tag):
+            return "".join(f"{tag:03d}" + "x" * 80 + "\n" for _ in range(20000))
+
+        errors: list[BaseException] = []
+
+        def writer(tag):
+            try:
+                with dl.atomic_output_path(str(dest)) as t:
+                    Path(t).write_text(payload(tag))
+            except BaseException as e:  # noqa: BLE001 - recorded and re-raised below
+                errors.append(e)
+
+        threads = [threading.Thread(target=writer, args=(i,))
+                   for i in range(nwriters)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"writers failed: {errors[:3]}"
+        text = dest.read_text()
+        tags = {line[:3] for line in text.splitlines() if line}
+        assert len(tags) == 1, "destination interleaves several writers' output"
+        assert text == payload(int(tags.pop())), "destination is truncated"
+        assert [p.name for p in tmp.iterdir()] == [dest.name], "temp files left behind"

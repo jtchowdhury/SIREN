@@ -20,6 +20,7 @@
 #include "../../public/SIREN/geometry/Trap.h"
 #include "../../public/SIREN/geometry/Ellipsoid.h"
 #include "../../public/SIREN/geometry/Para.h"
+#include "../../public/SIREN/geometry/GeometryMesh.h"
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -38,6 +39,8 @@ PYBIND11_MODULE(geometry,m) {
         .def("IsInside", (bool (Geometry::*)(siren::math::Vector3D const &) const) &Geometry::IsInside)
         .def("Intersections", (std::vector<Geometry::Intersection> (Geometry::*)(siren::math::Vector3D const &, siren::math::Vector3D const &) const) &Geometry::Intersections)
         .def("DistanceToClosestApproach",&Geometry::DistanceToClosestApproach)
+        .def("GetBoundingBox",&Geometry::GetBoundingBox)
+        .def("GetWorldBoundingBox",&Geometry::GetWorldBoundingBox)
         .def_property_readonly("name",&Geometry::GetName)
         .def_property("placement",&Geometry::GetPlacement, &Geometry::SetPlacement)
         .def("ComputeIntersections",&Geometry::ComputeIntersections)
@@ -97,6 +100,18 @@ PYBIND11_MODULE(geometry,m) {
         .def_property("Y",&Box::GetY, &Box::SetY)
         .def_property("Z",&Box::GetZ, &Box::SetZ);
 
+    // TriangularMesh
+
+    class_<TriangularMesh, std::shared_ptr<TriangularMesh>, Geometry>(m, "TriangularMesh")
+        .def(init<>())
+        .def(init<std::vector<std::array<siren::math::Vector3D, 3>> const &>())
+        .def(init<Placement const &, std::vector<std::array<siren::math::Vector3D, 3>> const &>())
+        .def(init<Placement const &>())
+        .def(init<const TriangularMesh&>())
+        .def("TriangleCount", &TriangularMesh::TriangleCount)
+        .def("GetTriangles", &TriangularMesh::GetTriangles)
+        .def("ValidateClosed", &TriangularMesh::ValidateClosed);
+
     // Cone
 
     class_<Cone, std::shared_ptr<Cone>, Geometry>(m, "Cone")
@@ -111,7 +126,9 @@ PYBIND11_MODULE(geometry,m) {
         .def_property_readonly("Rmax1",&Cone::GetRmax1)
         .def_property_readonly("Rmin2",&Cone::GetRmin2)
         .def_property_readonly("Rmax2",&Cone::GetRmax2)
-        .def_property_readonly("Z",&Cone::GetZ);
+        .def_property_readonly("Z",&Cone::GetZ)
+        .def_property_readonly("StartPhi",&Cone::GetStartPhi)
+        .def_property_readonly("DeltaPhi",&Cone::GetDeltaPhi);
 
     // Torus
 
@@ -141,7 +158,9 @@ PYBIND11_MODULE(geometry,m) {
         .def(init<const Polycone&>())
         .def_property_readonly("ZPlanes",&Polycone::GetZPlanes)
         .def_property_readonly("Rmin",&Polycone::GetRmin)
-        .def_property_readonly("Rmax",&Polycone::GetRmax);
+        .def_property_readonly("Rmax",&Polycone::GetRmax)
+        .def_property_readonly("StartPhi",&Polycone::GetStartPhi)
+        .def_property_readonly("DeltaPhi",&Polycone::GetDeltaPhi);
 
     // Polyhedra
 
@@ -155,6 +174,7 @@ PYBIND11_MODULE(geometry,m) {
         .def(init<const Polyhedra&>())
         .def_property_readonly("NumSides",&Polyhedra::GetNumSides)
         .def_property_readonly("StartPhi",&Polyhedra::GetStartPhi)
+        .def_property_readonly("DeltaPhi",&Polyhedra::GetDeltaPhi)
         .def_property_readonly("ZPlanes",&Polyhedra::GetZPlanes)
         .def_property_readonly("Rmin",&Polyhedra::GetRmin)
         .def_property_readonly("Rmax",&Polyhedra::GetRmax);
@@ -199,7 +219,9 @@ PYBIND11_MODULE(geometry,m) {
         .def(init<const Cylinder&>())
         .def_property("InnerRadius",&Cylinder::GetInnerRadius, &Cylinder::SetInnerRadius)
         .def_property("Radius",&Cylinder::GetRadius, &Cylinder::SetRadius)
-        .def_property("Z",&Cylinder::GetZ, &Cylinder::SetZ);
+        .def_property("Z",&Cylinder::GetZ, &Cylinder::SetZ)
+        .def_property_readonly("StartPhi",&Cylinder::GetStartPhi)
+        .def_property_readonly("DeltaPhi",&Cylinder::GetDeltaPhi);
 
     // Sphere
 
@@ -260,7 +282,9 @@ PYBIND11_MODULE(geometry,m) {
         .def_property_readonly("Rmax",&CutTube::GetRmax)
         .def_property_readonly("Dz",&CutTube::GetDz)
         .def_property_readonly("LowNorm",&CutTube::GetLowNorm)
-        .def_property_readonly("HighNorm",&CutTube::GetHighNorm);
+        .def_property_readonly("HighNorm",&CutTube::GetHighNorm)
+        .def_property_readonly("StartPhi",&CutTube::GetStartPhi)
+        .def_property_readonly("DeltaPhi",&CutTube::GetDeltaPhi);
 
     // Trap
 

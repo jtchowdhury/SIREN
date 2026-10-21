@@ -65,16 +65,14 @@ package_add_test(UnitTest_Axis ${PROJECT_SOURCE_DIR}/projects/detector/private/t
 package_add_test(UnitTest_DensityDistribution ${PROJECT_SOURCE_DIR}/projects/detector/private/test/DensityDistribution_TEST.cxx)
 package_add_test(UnitTest_Distribution1D ${PROJECT_SOURCE_DIR}/projects/detector/private/test/Distribution1D_TEST.cxx)
 package_add_test(UnitTest_DetectorModel ${PROJECT_SOURCE_DIR}/projects/detector/private/test/DetectorModel_TEST.cxx)
+package_add_test(UnitTest_DetectorModelDegenerateDirection ${PROJECT_SOURCE_DIR}/projects/detector/private/test/DetectorModelDegenerateDirection_TEST.cxx)
 package_add_test(UnitTest_MaterialModel ${PROJECT_SOURCE_DIR}/projects/detector/private/test/MaterialModel_TEST.cxx)
 package_add_test(UnitTest_Path ${PROJECT_SOURCE_DIR}/projects/detector/private/test/Path_TEST.cxx)
 package_add_test(UnitTest_GDMLParser ${PROJECT_SOURCE_DIR}/projects/detector/private/test/GDMLParser_TEST.cxx)
 package_add_test(UnitTest_BVH ${PROJECT_SOURCE_DIR}/projects/detector/private/test/BVH_TEST.cxx)
 
-pybind11_add_module(detector ${PROJECT_SOURCE_DIR}/projects/detector/private/pybindings/detector.cxx)
-target_link_libraries(detector PRIVATE SIREN)
-siren_strip_module(detector)
-if(DEFINED SKBUILD)
-set_target_properties(detector PROPERTIES
-        BUILD_WITH_INSTALL_RPATH FALSE
-        LINK_FLAGS "-Wl,-rpath,\\\$ORIGIN/../siren.libs/")
+if(SIREN_BUILD_PYTHON_BINDINGS)
+    pybind11_add_module(detector ${PROJECT_SOURCE_DIR}/projects/detector/private/pybindings/detector.cxx)
+    target_link_libraries(detector PRIVATE SIREN_python)
+    siren_strip_module(detector)
 endif()
