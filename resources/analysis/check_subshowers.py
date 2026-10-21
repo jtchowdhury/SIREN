@@ -120,12 +120,24 @@ def main():
     print("  subshowers by parent species:")
     for i in order:
         print(f"      {uniq[i]:6s} {counts[i]:8d}  ({100*counts[i]/n_sub:5.2f}%)")
-    # fraction of parent instances that were multi-component (m>=2)
+    # TRUE per-particle m-distribution: group subshowers by parent WITHIN each
+    # interaction. Parent tags (e.g. "pi0(1)") are only unique within one
+    # interaction -- they repeat across events -- so we must NOT flatten them
+    # globally here, or every recurring tag looks like an m>=2 particle.
     import collections
-    per_instance = collections.Counter(parent)
-    m_ge2 = sum(1 for c in per_instance.values() if c >= 2)
-    print(f"  parent instances: {len(per_instance)}  "
-          f"({m_ge2} with m>=2, {100*m_ge2/max(len(per_instance),1):.1f}%)")
+    parent_nested = ak.to_list(column(arr, "subshower_parent"))
+    m_counter = collections.Counter()
+    for _ev in parent_nested:
+        for _interaction in _ev:
+            for _tag, _m in collections.Counter(_interaction).items():
+                m_counter[_m] += 1
+    n_parents = sum(m_counter.values())
+    print(f"  parent particles: {n_parents}")
+    for _m in sorted(m_counter):
+        print(f"      m={_m}: {m_counter[_m]:7d}  ({100*m_counter[_m]/max(n_parents,1):.2f}%)")
+    m_ge2 = sum(v for mm, v in m_counter.items() if mm >= 2)
+    print(f"      m>=2 fraction: {100*m_ge2/max(n_parents,1):.2f}%  "
+          f"(expect a few % after the L_char veto)")
     print(f"  alpha  : [{alpha.min():.2f}, {alpha.max():.2f}]  median {np.median(alpha):.2f}")
     print(f"  beta   : [{beta.min():.4f}, {beta.max():.4f}]  median {np.median(beta):.4f}")
     print(f"  amplitude: [{amp.min():.3g}, {amp.max():.3g}]  median {np.median(amp):.3g}")
