@@ -1146,6 +1146,7 @@ def SaveEvents(events,
         "primary_momentum":[], # primary momentum of each interaction
         "secondary_momenta":[], # secondary momentum of each interaction
         "parent_idx":[], # index of the parent interaction
+        "gamma_subshowers":[], # per-interaction gamma shower components (if present)
     }
     for ie, event in enumerate(events):
         print("Saving Event %d/%d  " % (ie, len(events)), end="\r")
@@ -1171,7 +1172,8 @@ def SaveEvents(events,
                   "secondary_types",
                   "primary_momentum",
                   "secondary_momenta",
-                  "parent_idx"]:
+                  "parent_idx",
+                  "gamma_subshowers"]:
             datasets[k].append([])
         # parent index of each interaction, taken from the tree's parent edges
         parent_indices = get_parent_indices(event.tree)
@@ -1205,6 +1207,24 @@ def SaveEvents(events,
                 datasets["secondary_types"][-1][-1].append(int(sec_type))
                 datasets["secondary_momenta"][-1][-1].append(np.array(sec_momenta,dtype=float))
             datasets["num_secondaries"][-1].append(isec+1)
+
+            # gamma subshowers: GammaDISFromSpline stores them as indexed scalars
+            # in interaction_parameters (subshower_count + subshower_<i>_*). Read
+            # them back into five parallel columns. Interactions without them
+            # (any non-Gamma cross section) get empty lists.
+            ip = dict(datum.record.interaction_parameters)
+            ns = int(ip.get("subshower_count", 0))
+            gs = {"subshower_alpha": [], "subshower_beta": [],
+                  "subshower_amplitude": [], "subshower_parent_pid": [],
+                  "subshower_parent_inst": []}
+            for isub in range(ns):
+                p = "subshower_%d" % isub
+                gs["subshower_alpha"].append(float(ip[p + "_alpha"]))
+                gs["subshower_beta"].append(float(ip[p + "_beta"]))
+                gs["subshower_amplitude"].append(float(ip[p + "_amplitude"]))
+                gs["subshower_parent_pid"].append(int(ip[p + "_parent_pid"]))
+                gs["subshower_parent_inst"].append(int(ip[p + "_parent_inst"]))
+            datasets["gamma_subshowers"][-1].append(gs)
         datasets["num_interactions"].append(id+1)
 
     # awkward must be imported here rather than at module scope

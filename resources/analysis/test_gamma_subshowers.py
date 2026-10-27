@@ -20,7 +20,9 @@ from siren._util import GenerateEvents, SaveEvents
 
 # where your model + pythia store live (edit if different)
 SIREN_ROOT = os.environ.get("SIREN_ROOT", os.path.expanduser("~/SIREN"))
-MODEL_NPZ  = os.path.join(SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/shower_model.npz")
+# the C++ GammaDISFromSpline reads the NUMERIC-ONLY repack (convert_model_for_cpp.py),
+# not the original shower_model.npz (whose __meta__ is a JSON/unicode array cnpy can't read)
+MODEL_NPZ  = os.path.join(SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/shower_model_cpp.npz")
 PYTHIA_NPZ = os.path.join(SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/pythia_events_nue.npz")
 
 N_EVENTS = 100
@@ -34,6 +36,8 @@ primary_processes, _ = siren.utilities.load_processes(
     target_types=[siren.dataclasses.Particle.ParticleType.Nucleon],
     isoscalar=True,
     process_types=["CC"],
+    shower_model_path=MODEL_NPZ,      # -> builds GammaDISFromSpline
+    pythia_events_path=PYTHIA_NPZ,
 )
 primary_cross_sections = primary_processes[primary_type]
 
@@ -54,12 +58,13 @@ print(f"Injecting {N_EVENTS} CC nu_e DIS events ...")
 events, gen_times = GenerateEvents(injector)
 
 print("Developing blobs + saving (test.hdf5) ...")
+# NOTE: with GammaDISFromSpline, the subshowers are developed in C++ during the
+# injection and stored on each record's interaction_parameters. SaveEvents just
+# reads them back into the gamma_subshowers HDF5 field -- no model paths needed here.
 SaveEvents(
     events,
     weighter=None,
     gen_times=gen_times,
     output_filename="test",
-    shower_model_path=MODEL_NPZ,
-    pythia_events_path=PYTHIA_NPZ,
 )
 print("\nDone. Now run:  python check_subshowers.py test.hdf5")

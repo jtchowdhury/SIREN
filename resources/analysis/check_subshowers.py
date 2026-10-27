@@ -74,7 +74,14 @@ def main():
     alpha  = ak.to_numpy(ak.flatten(column(arr, "subshower_alpha"),     axis=None)).astype(float)
     beta   = ak.to_numpy(ak.flatten(column(arr, "subshower_beta"),      axis=None)).astype(float)
     amp    = ak.to_numpy(ak.flatten(column(arr, "subshower_amplitude"), axis=None)).astype(float)
-    parent = ak.to_list(ak.flatten(column(arr, "subshower_parent"),     axis=None))
+    # parent: real output has subshower_parent_pid/_inst (ints); the mock has a
+    # subshower_parent string tag. Build a uniform string key either way.
+    gs_fields = arr["gamma_subshowers"].fields
+    if "subshower_parent_pid" in gs_fields:
+        pid_flat = ak.to_list(ak.flatten(column(arr, "subshower_parent_pid"), axis=None))
+        parent = [str(int(p)) for p in pid_flat]
+    else:
+        parent = ak.to_list(ak.flatten(column(arr, "subshower_parent"), axis=None))
 
     n_events = len(arr)
     n_int    = len(n_per_int)
@@ -125,11 +132,18 @@ def main():
     # interaction -- they repeat across events -- so we must NOT flatten them
     # globally here, or every recurring tag looks like an m>=2 particle.
     import collections
-    parent_nested = ak.to_list(column(arr, "subshower_parent"))
+    if "subshower_parent_pid" in gs_fields:
+        pid_nested  = ak.to_list(column(arr, "subshower_parent_pid"))
+        inst_nested = ak.to_list(column(arr, "subshower_parent_inst"))
+        parent_nested = [[list(zip(p, i)) for p, i in zip(ev_p, ev_i)]
+                         for ev_p, ev_i in zip(pid_nested, inst_nested)]
+    else:
+        parent_nested = ak.to_list(column(arr, "subshower_parent"))
     m_counter = collections.Counter()
     for _ev in parent_nested:
         for _interaction in _ev:
-            for _tag, _m in collections.Counter(_interaction).items():
+            for _tag, _m in collections.Counter(
+                    [tuple(t) if isinstance(t, list) else t for t in _interaction]).items():
                 m_counter[_m] += 1
     n_parents = sum(m_counter.values())
     print(f"  parent particles: {n_parents}")
