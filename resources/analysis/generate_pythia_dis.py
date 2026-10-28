@@ -112,6 +112,9 @@ def run_dis_events(E_nu_GeV, n_events=10000):
         "top20_energies":    [],   # energies of top 20 secondaries, sorted descending
         "top20_pids":        [],   # their PDG IDs
         "top20_cher_weights":[],   # Cherenkov weights for each
+        "top20_momenta":     [],   # (20, 4) four-momentum [E, px, py, pz] of each, aligned with top20_pids
+        "p_had":             [],   # (4,) total hadronic four-momentum [E, px, py, pz], summed over ALL hadronic finals
+        "p_lepton":          [],   # (4,) scattered charged-lepton four-momentum [E, px, py, pz] (most energetic e/mu/tau)
     }
 
     n_done = 0
@@ -119,21 +122,32 @@ def run_dis_events(E_nu_GeV, n_events=10000):
         if not pythia.next():
             continue
 
-        # Collect final-state hadronic particles (skip leptons + neutrinos)
-        hadrons = []
+        # Collect final-state hadronic particles (skip leptons + neutrinos).
+        # Each entry keeps the full four-momentum so it can be stored and, later,
+        # Lorentz-boosted to match the hadronic blob exactly (energy scaling alone
+        # conserves energy but not momentum).
+        hadrons = []                 # (E, pid, px, py, pz)
         E_had   = 0.0
         E_pi0   = 0.0
+        p_had   = np.zeros(4)        # [E, px, py, pz] summed over ALL hadronic finals
+        p_lep   = np.zeros(4)        # scattered charged lepton (most energetic e/mu/tau)
+        E_lep_best = -1.0
 
         for i in range(pythia.event.size()):
             p = pythia.event[i]
             if not p.isFinal():
                 continue
             pid = p.id()
+            e, px, py, pz = p.e(), p.px(), p.py(), p.pz()
             if abs(pid) in LEPTON_IDS:
+                # capture the hard scattered charged lepton (e/mu/tau), most energetic
+                if abs(pid) in (11, 13, 15) and e > E_lep_best:
+                    E_lep_best = e
+                    p_lep = np.array([e, px, py, pz])
                 continue
-            e = p.e()
-            hadrons.append((e, pid))
+            hadrons.append((e, pid, px, py, pz))
             E_had += e
+            p_had += np.array([e, px, py, pz])
             # EM energy: pi0, eta, and any photons that survived (e.g. from
             # other sources). pi0 and eta are kept stable above, so they
             # appear directly here.
@@ -144,16 +158,17 @@ def run_dis_events(E_nu_GeV, n_events=10000):
         if E_had < 0.5:   # skip near-elastic events with negligible hadronic energy
             continue
 
-        hadrons.sort(reverse=True)  # sort by energy descending
+        hadrons.sort(key=lambda h: h[0], reverse=True)  # sort by energy descending
 
         f_EM = E_pi0 / E_had
 
         # Pad to 20 entries so every event has the same shape
         top20 = hadrons[:20]
         pad   = 20 - len(top20)
-        top20_e   = [x[0] for x in top20] + [0.0] * pad
-        top20_pid = [x[1] for x in top20] + [0]   * pad
-        top20_cw  = [cherenkov_weight(x[1]) for x in top20] + [0.0] * pad
+        top20_e   = [h[0] for h in top20] + [0.0] * pad
+        top20_pid = [h[1] for h in top20] + [0]   * pad
+        top20_cw  = [cherenkov_weight(h[1]) for h in top20] + [0.0] * pad
+        top20_mom = [[h[0], h[2], h[3], h[4]] for h in top20] + [[0.0, 0.0, 0.0, 0.0]] * pad
 
         records["E_had"].append(E_had)
         records["f_EM"].append(f_EM)
@@ -165,6 +180,9 @@ def run_dis_events(E_nu_GeV, n_events=10000):
         records["top20_energies"].append(top20_e)
         records["top20_pids"].append(top20_pid)
         records["top20_cher_weights"].append(top20_cw)
+        records["top20_momenta"].append(top20_mom)
+        records["p_had"].append(p_had.tolist())
+        records["p_lepton"].append(p_lep.tolist())
 
         n_done += 1
 
@@ -199,5 +217,17 @@ if __name__ == "__main__":
                   f"  (mean {data['E_had'].mean():.1f})")
             print(f"  f_EM   : {data['f_EM'].mean():.3f} ± {data['f_EM'].std():.3f}")
             print(f"  n_total: {data['n_total'].mean():.1f} ± {data['n_total'].std():.1f}")
+
+            # conservation sanity: p_lepton + p_had should equal the initial state
+            # p_nu + p_target = (E_nu + m_p, 0, 0, E_nu). Report the mean residual.
+            m_p = 0.938272
+            init = np.array([E_nu + m_p, 0.0, 0.0, E_nu])
+            tot  = data["p_lepton"] + data["p_had"]            # (n, 4)
+            resid = tot - init                                  # (n, 4)
+            print(f"  4-mom conservation |Σp_out − p_in| (mean): "
+                  f"E {np.abs(resid[:,0]).mean():.2e}, "
+                  f"px {np.abs(resid[:,1]).mean():.2e}, "
+                  f"py {np.abs(resid[:,2]).mean():.2e}, "
+                  f"pz {np.abs(resid[:,3]).mean():.2e} GeV")
 
     print(f"\nSaved to {outfile}")
