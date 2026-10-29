@@ -22,10 +22,14 @@
 
 #include <set>
 #include <map>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
+#include <utility>
 #include <cstdint>
+
+#include "SIREN/dataclasses/InteractionSignature.h"
 
 #include <cereal/cereal.hpp>
 #include <cereal/types/polymorphic.hpp>
@@ -77,7 +81,17 @@ private:
     std::vector<double>              pythia_Ehad_;      // [Nev]
     std::vector<std::vector<int>>    pythia_pids_;      // [Nev][<=20]
     std::vector<std::vector<double>> pythia_energies_;  // [Nev][<=20]
+    // four-momenta for the Lorentz boost (require the updated pythia_events_nue.npz)
+    std::vector<std::vector<std::array<double,4>>> pythia_momenta_; // [Nev][<=20][E,px,py,pz]
+    std::vector<std::array<double,4>> pythia_phad_;     // [Nev] total hadronic 4-mom
+    bool have_momenta_ = false;                          // true if the npz carried momenta
     std::vector<double>              bin_edges_;         // [n_bins+1] over E_had
+
+    // our own signatures: lepton (mu/tau only) + kMaxSub_ GammaSubshower slots
+    std::vector<dataclasses::InteractionSignature> gamma_signatures_;
+    std::map<std::pair<siren::dataclasses::ParticleType, siren::dataclasses::ParticleType>,
+             std::vector<dataclasses::InteractionSignature>> gamma_signatures_by_parents_;
+    int kMaxSub_ = 0;                                    // padded max # of subshower slots
 
     bool loaded_ = false;
 
@@ -108,9 +122,20 @@ public:
 
     bool equal(CrossSection const & other) const override;
 
-    // The ONLY physics override: base fills lepton + Hadrons blob, then we add the gamma subshowers.
+    // Reproduces the DIS kinematics (copied from DISFromSpline) but, instead of
+    // emitting the scattered lepton + a single Hadrons blob, emits the hadronic
+    // system (and, for CC nu_e, the electron) as GammaSubshower secondaries whose
+    // 4-momentum slots carry [amplitude, alpha, beta, parent_pid]. For CC
+    // nu_mu/nu_tau the lepton is kept as a normal track secondary (slot 0).
     void SampleFinalState(dataclasses::CrossSectionDistributionRecord &,
                           std::shared_ptr<siren::utilities::SIREN_random> random) const override;
+
+    // Signature override: GammaSubshower slots (+ lepton slot for mu/tau). This
+    // is what sets the secondary count; the base's [lepton, Hadrons] is replaced.
+    std::vector<dataclasses::InteractionSignature> GetPossibleSignatures() const override;
+    std::vector<dataclasses::InteractionSignature> GetPossibleSignaturesFromParents(
+        siren::dataclasses::ParticleType primary_type,
+        siren::dataclasses::ParticleType target_type) const override;
 
     std::string Name() const; // "GammaDISFromSpline"
 
@@ -166,6 +191,20 @@ private:
     int    bin_index_(double E_had) const;
     static void from_z_(std::vector<double> const & z, int m,
                         std::vector<double> & w, std::vector<double> & alpha, std::vector<double> & beta);
+
+    // build gamma_signatures_ from the primary/target types (CC assumed); called
+    // once after the base ctor has set up primaries/targets.
+    void InitializeGammaSignatures();
+
+    // pick a pythia library event near E_had, Lorentz-boost its hadrons so their
+    // total 4-momentum equals p4 (the DIS hadronic blob), and return the
+    // energy-conserving (pid, E) breakdown (top-K + pi0 remainder). If the npz
+    // has no momenta, falls back to uniform energy-scaling.
+    // returns (parent_pid, boosted 4-mom [E,px,py,pz]) per final-state hadron
+    // (top-K + pi0 remainder); the 4-momenta sum to p4 (conservation).
+    std::vector<std::pair<int,std::array<double,4>>> BoostedBreakdown(
+        std::array<double,4> const & p4,
+        std::shared_ptr<siren::utilities::SIREN_random> random) const;
 };
 
 } // namespace interactions
