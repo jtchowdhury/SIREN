@@ -571,7 +571,7 @@ void GammaDISFromSpline::SampleFinalState(
     // the incoming neutrino is massless, so its kinetic energy is its total energy
 
     double primary_energy = p1.e();
-    double E1_lab = p1.e(), 
+    double E1_lab = p1.e();
     double E2_lab = p2.e();
     double m1 = record.primary_mass; 
     double m3 = m;

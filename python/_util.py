@@ -1146,7 +1146,8 @@ def SaveEvents(events,
         "primary_momentum":[], # primary momentum of each interaction
         "secondary_momenta":[], # secondary momentum of each interaction
         "parent_idx":[], # index of the parent interaction
-        "gamma_subshowers":[], # per-interaction gamma shower components (if present)
+        "interaction_param_keys":[],   # per-interaction interaction_parameters keys
+        "interaction_param_values":[], # ... and their values (parallel to keys)
     }
     for ie, event in enumerate(events):
         print("Saving Event %d/%d  " % (ie, len(events)), end="\r")
@@ -1173,7 +1174,8 @@ def SaveEvents(events,
                   "primary_momentum",
                   "secondary_momenta",
                   "parent_idx",
-                  "gamma_subshowers"]:
+                  "interaction_param_keys",
+                  "interaction_param_values"]:
             datasets[k].append([])
         # parent index of each interaction, taken from the tree's parent edges
         parent_indices = get_parent_indices(event.tree)
@@ -1208,23 +1210,17 @@ def SaveEvents(events,
                 datasets["secondary_momenta"][-1][-1].append(np.array(sec_momenta,dtype=float))
             datasets["num_secondaries"][-1].append(isec+1)
 
-            # gamma subshowers: GammaDISFromSpline stores them as indexed scalars
-            # in interaction_parameters (subshower_count + subshower_<i>_*). Read
-            # them back into five parallel columns. Interactions without them
-            # (any non-Gamma cross section) get empty lists.
+            # interaction_parameters (scalars). For GammaDISFromSpline this holds
+            # energy/bjorken_x/bjorken_y, the blob and lepton 4-momenta
+            # (had_*/lep_*), and each boosted constituent hadron (hadron<i>_*).
+            # The GammaSubshower secondaries carry [amplitude,alpha,beta,parent_pid]
+            # in their secondary_momenta slots above. Keys vary per interaction, so
+            # store them as parallel key/value lists.
             ip = dict(datum.record.interaction_parameters)
-            ns = int(ip.get("subshower_count", 0))
-            gs = {"subshower_alpha": [], "subshower_beta": [],
-                  "subshower_amplitude": [], "subshower_parent_pid": [],
-                  "subshower_parent_inst": []}
-            for isub in range(ns):
-                p = "subshower_%d" % isub
-                gs["subshower_alpha"].append(float(ip[p + "_alpha"]))
-                gs["subshower_beta"].append(float(ip[p + "_beta"]))
-                gs["subshower_amplitude"].append(float(ip[p + "_amplitude"]))
-                gs["subshower_parent_pid"].append(int(ip[p + "_parent_pid"]))
-                gs["subshower_parent_inst"].append(int(ip[p + "_parent_inst"]))
-            datasets["gamma_subshowers"][-1].append(gs)
+            keys = sorted(ip.keys())
+            datasets["interaction_param_keys"][-1].append([str(k) for k in keys])
+            datasets["interaction_param_values"][-1].append(
+                np.array([float(ip[k]) for k in keys], dtype=float))
         datasets["num_interactions"].append(id+1)
 
     # awkward must be imported here rather than at module scope
