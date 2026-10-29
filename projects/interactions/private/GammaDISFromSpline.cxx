@@ -504,10 +504,21 @@ std::vector<std::pair<int,std::array<double,4>>> GammaDISFromSpline::BoostedBrea
 
     // ranked list of (energy, pid, boosted 4-mom [E,px,py,pz])
     std::vector<std::tuple<double,int,std::array<double,4>>> ranked;
+    // Build an rk::P4 from (E,px,py,pz) with the mass clamped at 0. rk::P4(E,p)
+    // takes sqrt(E^2-p^2), which is NaN for massless particles (photons) when
+    // round-off makes it slightly negative.
+    auto clamped_mass = [](double E, double px, double py, double pz) {
+        return std::sqrt(std::max(0.0, E*E - px*px - py*py - pz*pz));
+    };
+    // boosted 4-momentum of the library particles BEYOND the stored top 20
+    std::array<double,4> leftover = {0.0, 0.0, 0.0, 0.0};
     if(have_momenta_ && !pythia_momenta_[ievt].empty()) {
-        rk::P4 P_tgt(p4[0], geom3::Vector3(p4[1], p4[2], p4[3]));
+        std::array<double,4> lib_sum = {0.0, 0.0, 0.0, 0.0};   // stored particles, library frame
+        rk::P4 P_tgt(geom3::Vector3(p4[1], p4[2], p4[3]),
+                     clamped_mass(p4[0], p4[1], p4[2], p4[3]));
         auto const & ph = pythia_phad_[ievt];
-        rk::P4 P_lib(ph[0], geom3::Vector3(ph[1], ph[2], ph[3]));
+        rk::P4 P_lib(geom3::Vector3(ph[1], ph[2], ph[3]),
+                     clamped_mass(ph[0], ph[1], ph[2], ph[3]));
         rk::Boost toCM  = P_lib.restBoost();     // lab(lib) -> CM
         rk::Boost toLab = P_tgt.labBoost();      // rest(tgt) -> lab(tgt)
         double Mlib = P_lib.m(), Mtgt = P_tgt.m();
@@ -516,11 +527,28 @@ std::vector<std::pair<int,std::array<double,4>>> GammaDISFromSpline::BoostedBrea
             int pid = pythia_pids_[ievt][j];
             auto const & q = pythia_momenta_[ievt][j];
             if(pid == 0 || !(q[0] > 0.0)) continue;
-            rk::P4 h(q[0], geom3::Vector3(q[1], q[2], q[3]));
+            double mj = clamped_mass(q[0], q[1], q[2], q[3]);     // Lorentz invariant
+            rk::P4 h(geom3::Vector3(q[1], q[2], q[3]), mj);
             h.boost(toCM);
-            h = rk::P4(h.e() * lam, h.momentum() * lam);   // rescale in CM
+            h = rk::P4(h.momentum() * lam, mj * lam);            // rescale in CM
             h.boost(toLab);
-            ranked.push_back({h.e(), pid, {h.e(), h.px(), h.py(), h.pz()}});
+            std::array<double,4> hq = {h.e(), h.px(), h.py(), h.pz()};
+            for(int k = 0; k < 4; ++k) lib_sum[k] += q[k];
+            ranked.push_back({h.e(), pid, hq});
+        }
+        // The library stores only the top 20 particles, but p_had sums ALL of them.
+        // L = p_had - Sum(stored) is the 4-momentum of the particles beyond rank 20,
+        // in the library frame. Push it through the SAME transformation (boost to CM,
+        // rescale, boost to blob) independently. If the boost is right, the hadrons
+        // then sum to p4 to round-off; if it's wrong, check 2 will expose it.
+        double L[4] = {ph[0]-lib_sum[0], ph[1]-lib_sum[1], ph[2]-lib_sum[2], ph[3]-lib_sum[3]};
+        if(L[0] > 1e-12 * ph[0]) {
+            double mL = clamped_mass(L[0], L[1], L[2], L[3]);
+            rk::P4 hL(geom3::Vector3(L[1], L[2], L[3]), mL);
+            hL.boost(toCM);
+            hL = rk::P4(hL.momentum() * lam, mL * lam);
+            hL.boost(toLab);
+            leftover = {hL.e(), hL.px(), hL.py(), hL.pz()};
         }
     } else {
         // fallback: uniform energy-scaling; momentum components unknown -> 0
@@ -544,7 +572,10 @@ std::vector<std::pair<int,std::array<double,4>>> GammaDISFromSpline::BoostedBrea
         if(kept < top_k_ && HasSpecies(pid)) { fs.push_back({pid, q4}); ++kept; }
         else for(int k = 0; k < 4; ++k) remainder[k] += q4[k];
     }
-    if(remainder[0] > 0.0 && HasSpecies(111)) fs.push_back({111, remainder});   // pi0
+    // fold the independently-transformed beyond-top-20 momentum into the remainder
+    for(int k = 0; k < 4; ++k) remainder[k] += leftover[k];
+    if(remainder[0] > 1e-9 * E_had && HasSpecies(111))
+        fs.push_back({111, remainder});   // pi0 remainder
     return fs;
 }
 
@@ -695,7 +726,14 @@ void GammaDISFromSpline::SampleFinalState(
             ++slot;
         }
     }
-    // remaining slots stay at default (amplitude 0); readers skip amplitude==0.
+    // Pad the unused slots explicitly. Finalize() reads mass/4-momentum from EVERY
+    // secondary slot, and an untouched slot throws ("Cannot calculate mass...").
+    // Padding = all-zero 4-mom (amplitude 0); readers skip amplitude == 0.
+    for(; slot < secondaries.size(); ++slot) {
+        secondaries[slot].SetFourMomentum({0.0, 0.0, 0.0, 0.0});
+        secondaries[slot].SetMass(0.0);
+        secondaries[slot].SetHelicity(0.0);
+    }
 }
 
 } // namespace interactions

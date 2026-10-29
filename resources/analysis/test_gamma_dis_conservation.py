@@ -78,7 +78,7 @@ for ie, event in enumerate(events):
         n_sub_total += len(subs)
 
         # (2) hadron-level conservation: Sum_i hadron<i> == blob
-        nhad = int(ip.get("had_count", 0))
+        nhad = len([k for k in ip if k.startswith("hadron") and k.endswith("_E")])
         sH = np.zeros(4)
         for i in range(nhad):
             q = np.array([ip[f"hadron{i}_E"], ip[f"hadron{i}_px"],
@@ -112,7 +112,12 @@ print(f"total gamma subshowers produced : {n_sub_total}")
 print(f"worst | Sum hadron - blob |      : {worst_had:.3e}   (should be ~1e-6 or better)")
 print(f"worst | lep+blob - (nu+target) | : {worst_tot:.3e}   (should be ~machine eps)")
 print()
-if had_momenta_all_zero:
+if all(not any(k.startswith("hadron") for k in dict(d.record.interaction_parameters))
+       for ev in events for d in ev.tree):
+    print("WARNING: no hadron<i>_* / had_count keys in interaction_parameters at all.")
+    print("         -> the installed GammaDISFromSpline is NOT the current source")
+    print("            (rebuild from the latest GammaDISFromSpline.cxx).")
+elif had_momenta_all_zero:
     print("WARNING: all hadron momenta are zero -> it FELL BACK to energy-scaling.")
     print("         (the loaded pythia_events_nue.npz has no four-momenta -> regenerate it.)")
 elif worst_had > 1e-3:

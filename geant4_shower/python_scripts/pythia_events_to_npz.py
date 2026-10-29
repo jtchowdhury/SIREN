@@ -74,7 +74,10 @@ def main():
         print("  (no four-momenta in this HDF5 -- regenerate with the updated "
               "generate_pythia_dis.py to include top20_momenta / p_had / p_lepton)")
 
-    np.savez_compressed(args.out, **out)
+    # UNCOMPRESSED on purpose: numpy writes ZIP64 local headers (size fields =
+    # 0xFFFFFFFF), which the C++ reader (cnpy) misreads for compressed entries and
+    # tries to allocate ~4 GB per array. Uncompressed entries load correctly.
+    np.savez(args.out, **out)
     sz = os.path.getsize(args.out) / 1024.0
     print(f"\nwrote {args.out}: {len(EH)} events, {PD.shape[1]} secondaries each "
           f"({sz:.1f} KB)")
