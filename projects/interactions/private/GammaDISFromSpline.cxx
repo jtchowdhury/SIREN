@@ -119,7 +119,11 @@ bool GammaDISFromSpline::equal(CrossSection const & other) const {
 //  model loading (cnpy)
 // ===========================================================================
 void GammaDISFromSpline::LoadShowerModel(std::string const & npz_path) {
-    cnpy::npz_t npz = cnpy::npz_load(npz_path);
+    cnpy::npz_t npz;
+    try { npz = cnpy::npz_load(npz_path); }
+    catch(std::exception const & e) {
+        throw std::runtime_error("GammaDISFromSpline: failed to read '" + npz_path + "': " + e.what());
+    }
     species_.clear();
 
     auto get_d = [&](std::string const & k) -> cnpy::NpyArray & {
@@ -171,7 +175,11 @@ void GammaDISFromSpline::LoadShowerModel(std::string const & npz_path) {
 }
 
 void GammaDISFromSpline::LoadPythiaEvents(std::string const & npz_path) {
-    cnpy::npz_t npz = cnpy::npz_load(npz_path);
+    cnpy::npz_t npz;
+    try { npz = cnpy::npz_load(npz_path); }
+    catch(std::exception const & e) {
+        throw std::runtime_error("GammaDISFromSpline: failed to read '" + npz_path + "': " + e.what());
+    }
     auto get = [&](std::string const & k) -> cnpy::NpyArray & {
         auto it = npz.find(k);
         if(it == npz.end()) throw std::runtime_error("pythia store missing key: " + k);
@@ -583,7 +591,7 @@ std::vector<std::pair<int,std::array<double,4>>> GammaDISFromSpline::BoostedBrea
 //  SampleFinalState: DIS kinematics (via the PUBLIC DifferentialCrossSection,
 //  since the spline is private to the base) -> p3 (lepton), p4 (hadronic). Then
 //  emit the hadronic system (+ electron for CC nu_e) as GammaSubshower
-//  secondaries whose 4-mom holds [amplitude, alpha, beta, parent_pid].
+//  secondaries whose 4-mom holds [amplitude, alpha, beta, parent_index].
 // ===========================================================================
 void GammaDISFromSpline::SampleFinalState(
     dataclasses::CrossSectionDistributionRecord & record,
@@ -613,7 +621,9 @@ void GammaDISFromSpline::SampleFinalState(
     double xMin = GetMinimumQ2() / (2.0 * E1_lab * E2_lab * yMax);
     auto dxs = [&](double x, double y) {
         if(!kinematicallyAllowed(x, y, primary_energy, record.target_mass, m)) return 0.0;
-        return DISFromSpline::DifferentialCrossSection(primary_energy, x, y, m);
+        // x*y = Jacobian of the uniform-in-(log x, log y) proposal; the base class
+        // includes the same factor ("measure" in DISFromSpline::SampleFinalState).
+        return x * y * DISFromSpline::DifferentialCrossSection(primary_energy, x, y, m);
     };
     // initial valid point
     double x = 0.0, y = 0.0, cs = 0.0;
@@ -622,7 +632,7 @@ void GammaDISFromSpline::SampleFinalState(
         y = std::pow(10.0, random->Uniform(std::log10(yMin), std::log10(yMax)));
         cs = dxs(x, y);
     }
-    const int burnin = 41;
+    const int burnin = 40;                 // same as DISFromSpline (41 steps)
     for(int j = 0; j <= burnin; ++j) {
         double tx = std::pow(10.0, random->Uniform(std::log10(xMin), 0.0));
         double ty = std::pow(10.0, random->Uniform(std::log10(yMin), std::log10(yMax)));
@@ -699,14 +709,16 @@ void GammaDISFromSpline::SampleFinalState(
         record.interaction_parameters[pre + "_px"]  = q[1];
         record.interaction_parameters[pre + "_py"]  = q[2];
         record.interaction_parameters[pre + "_pz"]  = q[3];
+        int parent_index = hidx;
         ++hidx;
 
-        // GammaSubshower secondaries: 4-mom = [amplitude, alpha, beta, parent_pid]
+        // GammaSubshower secondaries: 4-mom = [amplitude, alpha, beta, parent_index]
+        // parent_index i -> look up hadron<i>_pid / hadron<i>_E; -1 = the electron.
         std::vector<Component> comps = SampleShower(pid, q[0], random);
         for(auto & c : comps) {
             if(slot >= secondaries.size()) break;   // bounded by kMaxSub_; drop overflow
             secondaries[slot].SetFourMomentum(
-                {c.amplitude, c.alpha, c.beta, static_cast<double>(pid)});
+                {c.amplitude, c.alpha, c.beta, static_cast<double>(parent_index)});
             secondaries[slot].SetMass(0.0);
             secondaries[slot].SetHelicity(0.0);
             ++slot;
@@ -720,7 +732,7 @@ void GammaDISFromSpline::SampleFinalState(
         for(auto & c : comps) {
             if(slot >= secondaries.size()) break;
             secondaries[slot].SetFourMomentum(
-                {c.amplitude, c.alpha, c.beta, static_cast<double>(ELECTRON_PDG)});
+                {c.amplitude, c.alpha, c.beta, -1.0});   // parent_index -1 = electron (lep_*)
             secondaries[slot].SetMass(0.0);
             secondaries[slot].SetHelicity(0.0);
             ++slot;
@@ -734,6 +746,39 @@ void GammaDISFromSpline::SampleFinalState(
         secondaries[slot].SetMass(0.0);
         secondaries[slot].SetHelicity(0.0);
     }
+}
+
+// ===========================================================================
+//  DifferentialCrossSection(record): used by the Weighter (FinalStateProbability).
+//  Same x, y, Q^2 formulas as DISFromSpline, but the scattered lepton comes from
+//  the stored lep_* 4-momentum, not from secondary slot 0/1 (which are
+//  GammaSubshowers here). Works for e/mu/tau and any number of subshower slots.
+// ===========================================================================
+double GammaDISFromSpline::DifferentialCrossSection(
+    dataclasses::InteractionRecord const & interaction) const {
+    using PT = siren::dataclasses::ParticleType;
+    auto const & ip = interaction.interaction_parameters;
+    auto get = [&](std::string const & k) {
+        auto it = ip.find(k);
+        if(it == ip.end())
+            throw std::runtime_error("GammaDISFromSpline::DifferentialCrossSection: record has no '" + k + "'");
+        return it->second;
+    };
+
+    rk::P4 p1(geom3::Vector3(interaction.primary_momentum[1], interaction.primary_momentum[2],
+                             interaction.primary_momentum[3]), interaction.primary_mass);
+    rk::P4 p2(geom3::Vector3(0, 0, 0), interaction.target_mass);
+    double primary_energy = interaction.primary_momentum[0];
+
+    int lep_pdg = charged_lepton_pdg(interaction.signature.primary_type);
+    double lepton_mass = DISFromSpline::GetLeptonMass(static_cast<PT>(lep_pdg));
+    rk::P4 p3(geom3::Vector3(get("lep_px"), get("lep_py"), get("lep_pz")), lepton_mass);
+
+    rk::P4 q = p1 - p3;
+    double Q2 = -q.dot(q);
+    double y = 1.0 - p2.dot(p3) / p2.dot(p1);
+    double x = Q2 / (2.0 * p2.dot(q));
+    return DISFromSpline::DifferentialCrossSection(primary_energy, x, y, lepton_mass, Q2);
 }
 
 } // namespace interactions

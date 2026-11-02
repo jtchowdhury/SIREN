@@ -125,10 +125,18 @@ public:
     // Reproduces the DIS kinematics (copied from DISFromSpline) but, instead of
     // emitting the scattered lepton + a single Hadrons blob, emits the hadronic
     // system (and, for CC nu_e, the electron) as GammaSubshower secondaries whose
-    // 4-momentum slots carry [amplitude, alpha, beta, parent_pid]. For CC
+    // 4-momentum slots carry [amplitude, alpha, beta, parent_index]. For CC
     // nu_mu/nu_tau the lepton is kept as a normal track secondary (slot 0).
     void SampleFinalState(dataclasses::CrossSectionDistributionRecord &,
                           std::shared_ptr<siren::utilities::SIREN_random> random) const override;
+
+    // Reweighting path (FinalStateProbability -> DifferentialCrossSection(record)).
+    // The base reads the lepton from secondary slots 0/1, which here hold
+    // GammaSubshowers; this override reads the lepton 4-momentum from the stored
+    // lep_* interaction_parameters and the lepton mass from the primary type, then
+    // applies the base's exact x, y, Q^2 formulas.
+    using DISFromSpline::DifferentialCrossSection;
+    double DifferentialCrossSection(dataclasses::InteractionRecord const &) const override;
 
     // Signature override: GammaSubshower slots (+ lepton slot for mu/tau). This
     // is what sets the secondary count; the base's [lepton, Hadrons] is replaced.

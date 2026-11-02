@@ -3,7 +3,8 @@
 gen_gamma_dis.py -- generate N GammaDISFromSpline events and write:
     <out>.hdf5, <out>.parquet   (via SaveEvents, with all the new fields)
     <out>_secondaries.csv       (one row per secondary; GammaSubshower momenta
-                                  are [amplitude, alpha, beta, parent_pid])
+                                  are [amplitude, alpha, beta, parent_index];
+                                  parent_index i -> hadron<i>_pid/_E in _params.csv, -1 = electron)
     <out>_params.csv            (one row per interaction_parameters entry:
                                   energy/bjorken_x/y, had_*, lep_*, hadron<i>_*)
 
@@ -62,7 +63,7 @@ SaveEvents(events, weighter=None, gen_times=gen_times, output_filename=OUT)
 with open(OUT + "_secondaries.csv", "w", newline="") as f:
     w = csv.writer(f)
     w.writerow(["event", "interaction", "sec_idx", "type", "is_gammasub",
-                "mom0_or_amp", "mom1_or_alpha", "mom2_or_beta", "mom3_or_pid"])
+                "mom0_or_amp", "mom1_or_alpha", "mom2_or_beta", "mom3_or_parent_index"])
     for ie, event in enumerate(events):
         for ii, datum in enumerate(event.tree):
             types = list(datum.record.signature.secondary_types)

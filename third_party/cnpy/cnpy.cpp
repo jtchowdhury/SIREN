@@ -257,8 +257,8 @@ cnpy::npz_t cnpy::npz_load(std::string fname) {
 
         //read in the extra field
         uint16_t extra_field_len = *(uint16_t*) &local_header[28];
+        std::vector<char> buff(extra_field_len);
         if(extra_field_len > 0) {
-            std::vector<char> buff(extra_field_len);
             size_t efield_res = fread(&buff[0],sizeof(char),extra_field_len,fp);
             if(efield_res != extra_field_len)
                 throw std::runtime_error("npz_load: failed fread");
@@ -267,6 +267,29 @@ cnpy::npz_t cnpy::npz_load(std::string fname) {
         uint16_t compr_method = *reinterpret_cast<uint16_t*>(&local_header[0]+8);
         uint32_t compr_bytes = *reinterpret_cast<uint32_t*>(&local_header[0]+18);
         uint32_t uncompr_bytes = *reinterpret_cast<uint32_t*>(&local_header[0]+22);
+
+        // [SIREN patch] ZIP64: numpy writes 0xFFFFFFFF in the 32-bit size fields
+        // and stores the real sizes in the ZIP64 extra record (header id 0x0001:
+        // uncompressed size (8 bytes), then compressed size (8 bytes)). Without
+        // this, compressed .npz entries made cnpy allocate ~4 GB and fail.
+        if(compr_bytes == 0xFFFFFFFFu || uncompr_bytes == 0xFFFFFFFFu) {
+            size_t pos = 0;
+            while(pos + 4 <= buff.size()) {
+                uint16_t hid  = *reinterpret_cast<uint16_t*>(&buff[pos]);
+                uint16_t hlen = *reinterpret_cast<uint16_t*>(&buff[pos+2]);
+                if(hid == 0x0001) {
+                    size_t q = pos + 4;
+                    if(uncompr_bytes == 0xFFFFFFFFu && q + 8 <= buff.size()) {
+                        uncompr_bytes = static_cast<uint32_t>(*reinterpret_cast<uint64_t*>(&buff[q])); q += 8;
+                    }
+                    if(compr_bytes == 0xFFFFFFFFu && q + 8 <= buff.size()) {
+                        compr_bytes = static_cast<uint32_t>(*reinterpret_cast<uint64_t*>(&buff[q]));
+                    }
+                    break;
+                }
+                pos += 4 + hlen;
+            }
+        }
 
         if(compr_method == 0) {arrays[varname] = load_the_npy_file(fp);}
         else {arrays[varname] = load_the_npz_array(fp,compr_bytes,uncompr_bytes);}

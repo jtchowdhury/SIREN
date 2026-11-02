@@ -73,7 +73,7 @@ for ie, event in enumerate(events):
         types = [int(t) for t in rec.signature.secondary_types]
         moms = [np.array(p, dtype=float) for p in rec.secondary_momenta]
 
-        # GammaSubshower secondaries: momentum = [amplitude, alpha, beta, parent_pid]
+        # GammaSubshower secondaries: momentum = [amplitude, alpha, beta, parent_index]
         subs = [m for t, m in zip(types, moms) if t == GAMMASUB and m[0] > 0.0]
         n_sub_total += len(subs)
 
@@ -105,7 +105,7 @@ for ie, event in enumerate(events):
             a = subs[0] if subs else np.zeros(4)
             print(f"ev {ie:2d}: subshowers={len(subs):2d}  hadrons={nhad:2d}  "
                   f"|Sum h - blob|={res_had:.2e}  |lep+blob-(nu+tgt)|={res_tot:.2e}  "
-                  f"(e.g. amp={a[0]:.3g}, alpha={a[1]:.2f}, beta={a[2]:.4f}, pid={int(a[3])})")
+                  f"(e.g. amp={a[0]:.3g}, alpha={a[1]:.2f}, beta={a[2]:.4f}, parent={int(a[3])}, pid={int(ip.get(f'hadron{int(a[3])}_pid', 11)) if a[3] >= 0 else 11})")
 
 print()
 print(f"total gamma subshowers produced : {n_sub_total}")
