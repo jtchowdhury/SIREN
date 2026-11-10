@@ -12,28 +12,28 @@ F1  spaghetti at fixed E_nu   (ccnc_mono_E<E>_{cc,nc}.npz)
 F2  spaghetti at fixed E_had  (events selected from ccnc_range_{cc,nc}.npz with
     E_had within +-tol of the target). Separates "CC has an electron" from
     "NC has less energy".
-F3  L2 / KS vs E_had (and vs E_nu), one figure per channel. Reference = G4,
-    built as the SUM OF SINGLE-PARTICLE G4 SHOWERS for that event's particles
-    (each boosted hadron, plus the electron for CC). Compared against:
-      GammaDISFromSpline   the output subshowers of that event
-      Analytic             what DISFromSpline gives you: one analytic shower for
-                           the hadronic blob E_had (+ one for the electron, CC)
-      G4 vs G4             a second, independent G4 composite (the floor)
-    Metric and depth blur identical to compare_event_vs_g4.py.
+F3  L2 / KS vs E_had (and vs E_nu), one figure per channel.
+    For every SIREN event (= one boosted PYTHIA hadron list + the lepton):
+      * draw --n-g4 (100) G4 event showers: one single-particle G4 shower per
+        hadron (at its kinetic energy), plus one for the electron in CC;
+      * GammaDISFromSpline: the event's output subshowers (all, incl. the
+        electron), compared with each of the 100 G4 showers -> mean L2, mean KS;
+      * Analytic (DISFromSpline): one analytic shower of the hadronic blob only
+        (no electron), compared with each of the same 100 G4 showers;
+      * floor: one extra G4 shower vs the same 100.
+    The per-event means are then averaged in energy bins. Metric and depth blur
+    identical to compare_event_vs_g4.py.
 
-Analytic formulas (profile in depth x [cm], t = x / X0):
-  hadronic blob:  Gamma(t; a, b), a = 0.3 + 0.7 ln(E_had / 0.2 GeV), b = 0.9,
-                  X0 = 39.15 cm   (the "Current Analytic Approx." of compare_methods.py)
-  electron:       Gamma(t; a, b), b = 0.5, a = 1 + b (ln(E / E_c) - 0.5),
-                  E_c = 0.0786 GeV, X0 = 39.31 cm   (Longo/PDG EM profile with the
-                  electron constant C = -0.5; constants from shower_gamma_model.py)
-  each scaled to the model's MEAN total yield at that energy (pi+ yield for the
-  blob, e- yield for the electron). KS does not depend on that scale; L2 does.
+Analytic formula (profile in depth x [cm], t = x / X0):
+  hadronic blob:  Gamma(t; a, b), a = 0.3 + 0.7 ln(E / 0.2 GeV), b = 0.9,
+                  X0 = 39.15 cm   (the "Current Analytic Approx." of compare_methods.py),
+                  E = E_had - nucleon mass (kinetic), scaled to the model's mean
+                  pi+ yield at E. KS does not depend on that scale; L2 does.
 
 Usage:
     python plot_gamma_dis_ccnc.py --samples output/gamma_dis_samples \
-        --g4-dir ~/SIREN/geant4_shower/output --outdir output/gamma_dis_plots/ccnc
-    (without --g4-dir only F1 and F2 are made)
+        --g4-dir DIR [DIR ...] --outdir output/gamma_dis_plots/ccnc
+    (several --g4-dir folders are merged; without --g4-dir only F1 and F2 are made)
 """
 import os
 import sys
@@ -51,24 +51,27 @@ from plot_gamma_dis_showers import binned                       # also puts SIRE
 import hadronic_showers as hs                                   # noqa: E402
 
 COL = {"cc": "#4c78a8", "nc": "#f58518"}
-CURVES = {"gamma":  ("GammaDISFromSpline vs G4", "#F08070", "o", "-"),
+CURVES = {"gamma":    ("GammaDISFromSpline vs G4", "#F08070", "o", "-"),
           "analytic": ("Analytic (DISFromSpline blob) vs G4", "#4682B4", "s", "-"),
-          "floor":  ("G4 vs G4 (empirical floor)", "#444444", None, "--")}
+          "floor":    ("G4 vs G4 (empirical floor)", "#444444", None, "--")}
+CURVE_ORDER = ("gamma", "analytic", "floor")    # column order in the rows
 
 # analytic constants (see docstring)
 HAD_EC_GEV, HAD_BETA, HAD_X0_CM = 0.2, 0.9, 36.08 / 0.9216
-EM_EC_GEV, EM_B, EM_X0_CM = 0.0786, 0.5, 39.31
 M_NUCLEON = 0.5 * (G.REST_MASS[2212] + G.REST_MASS[2112])   # isoscalar target
 
 
 # --------------------------------------------------------------------------
 #  profiles
 # --------------------------------------------------------------------------
-def output_profile(s, e, x):
-    """Event shower from SIREN's output subshowers (all parents)."""
+def output_profile(s, e, x, hadrons_only=False):
+    """Event shower from SIREN's output subshowers (all parents, or only the
+    hadrons, parent >= 0, i.e. without the electron)."""
     a, b = s["sub_off"][e], s["sub_off"][e + 1]
     y = np.zeros_like(x)
     for k in range(a, b):
+        if hadrons_only and s["sub_parent"][k] < 0:
+            continue
         y += s["sub_amp"][k] * hs._kernel(x, s["sub_alpha"][k], s["sub_beta"][k])
     return y
 
@@ -76,11 +79,6 @@ def output_profile(s, e, x):
 def analytic_had(x, E, yield_tot):
     a = max(0.3 + 0.7 * np.log(E / HAD_EC_GEV), 1e-3)
     return yield_tot * hs._kernel(x / HAD_X0_CM, a, HAD_BETA) / HAD_X0_CM   # unit area in cm
-
-
-def analytic_em(x, E, yield_tot):
-    a = max(1.0 + EM_B * (np.log(E / EM_EC_GEV) - 0.5), 1e-3)
-    return yield_tot * hs._kernel(x / EM_X0_CM, a, EM_B) / EM_X0_CM
 
 
 def mean_yield(model, species, E):
@@ -125,76 +123,112 @@ def pick(rng, idx, n):
 # --------------------------------------------------------------------------
 #  F3: L2 / KS vs G4
 # --------------------------------------------------------------------------
-def load_g4_tools(g4_dir):
+def load_g4_tools(g4_dirs):
     sys.path.insert(0, os.path.join(G.SIREN_ROOT, "geant4_shower", "python_scripts"))
     import compare_event_vs_g4 as EV                               # noqa: E402
     import compare_methods as C                                    # noqa: E402
     from shower_gamma_model import load_g4_library                 # noqa: E402
-    if not glob.glob(os.path.join(g4_dir, "shower_*_E*GeV.h5")):
-        raise SystemExit(f"no shower_*_E*GeV.h5 files in {g4_dir}")
-    return EV, C, load_g4_library(g4_dir)
+    lib = {}
+    for d in g4_dirs:
+        if not glob.glob(os.path.join(d, "shower_*_E*GeV.h5")):
+            raise SystemExit(f"no shower_*_E*GeV.h5 files in {d}")
+        for pid, byE in load_g4_library(d).items():       # merge folders
+            lib.setdefault(pid, {}).update(byE)
+    return EV, C, lib
+
+
+def blur(G4, sigma, binw):
+    """Detector depth blur of G4 profiles (rows), exactly as compare_event_vs_g4._l2_ks."""
+    from scipy.ndimage import gaussian_filter1d
+    if sigma <= 0:
+        return np.asarray(G4, float)
+    return gaussian_filter1d(np.asarray(G4, float), max(sigma / binw, 1e-6),
+                             axis=-1, mode="constant")
+
+
+def l2_ks_many(Gb, test):
+    """L2 and KS of one test profile against many (already blurred) G4 profiles.
+    Same formulas as compare_event_vs_g4._l2_ks, vectorised over the rows of Gb."""
+    s = np.asarray(test, float)
+    denom = np.sum(Gb * Gb, axis=1)
+    l2 = np.where(denom > 0, np.sum((Gb - s) ** 2, axis=1) / np.where(denom > 0, denom, 1), np.nan)
+    gp, sp = np.clip(Gb, 0, None), np.clip(s, 0, None)
+    gs, ss = gp.sum(axis=1), sp.sum()
+    if ss <= 0:
+        return l2, np.full(len(Gb), np.nan)
+    cg = np.cumsum(gp, axis=1) / np.where(gs > 0, gs, 1)[:, None]
+    ks = np.where(gs > 0, np.max(np.abs(cg - np.cumsum(sp) / ss), axis=1), np.nan)
+    return l2, ks
 
 
 def g4_composite(EV, lib, parts, x_len, rng):
-    """Sum of single-particle G4 showers. Returns (profile, energy with no G4 entry)."""
-    tot, missing = np.zeros(x_len), 0.0
+    """One G4 event shower: sum of one single-particle G4 shower per hadron."""
+    tot = np.zeros(x_len)
     for pid, E in parts:
-        p = EV._g4_draw(lib, pid, E, rng)
-        if p is None:
-            missing += E
-        else:
-            tot += p
-    return tot, missing
+        tot += EV._g4_draw(lib, pid, E, rng)
+    return tot
 
 
-def score_channel(EV, lib, model, s, ch, x, sigma, binw, rng, max_events, max_missing):
+def score_channel(EV, lib, model, s, ch, x, sigma, binw, rng, max_events, max_missing, n_g4):
     n_ev = len(s["E_nu"])
     events = pick(rng, np.arange(n_ev), max_events)
-    rows, n_skip = [], 0
+    rows, n_skip, missing_pids = [], 0, {}
     for j, e in enumerate(events):
         h0, h1 = s["had_off"][e], s["had_off"][e + 1]
-        # kinetic energies: the G4 library and the model are labelled by E_kin
+        # hadrons at kinetic energy (the G4 library / model are labelled by E_kin)
         parts = [(int(s["had_pid"][i]), G.e_kin(s["had_pid"][i], float(s["had_p"][i, 0])))
                  for i in range(h0, h1)]
-        if ch == "cc":
-            parts.append((11, G.e_kin(11, float(s["lep"][e, 0]))))
         parts = [(pid, E) for pid, E in parts if E > 0]
         vis = sum(E for _, E in parts)
-        g4A, miss = g4_composite(EV, lib, parts, len(x), rng)
-        if vis <= 0 or miss / vis > max_missing or not np.any(g4A > 0):
+        miss = sum(E for pid, E in parts if pid not in lib)
+        for pid, E in parts:
+            if pid not in lib:
+                missing_pids[pid] = missing_pids.get(pid, 0.0) + E
+        if vis <= 0 or miss / vis > max_missing:
             n_skip += 1
             continue
-        g4B, _ = g4_composite(EV, lib, parts, len(x), rng)
+        parts = [(pid, E) for pid, E in parts if pid in lib]
+        if ch == "cc":                                   # G4 event = hadrons + electron
+            parts.append((11, G.e_kin(11, float(s["lep"][e, 0]))))
+        g4 = [g4_composite(EV, lib, parts, len(x), rng) for _ in range(n_g4 + 1)]
+        ref, extra = g4[:n_g4], g4[n_g4]                 # 100 references + 1 for the floor
+
         E_had = float(s["blob"][e, 0])
         # the blob contains the struck nucleon's rest mass (baryon number 1), which
         # makes no light -> develop the analytic with the blob's kinetic energy
         E_had_kin = max(E_had - M_NUCLEON, 1e-3)
         ana = analytic_had(x, E_had_kin, mean_yield(model, "pip", E_had_kin))
-        if ch == "cc":
-            E_e = G.e_kin(11, float(s["lep"][e, 0]))
-            ana = ana + analytic_em(x, E_e, mean_yield(model, "em", E_e))
-        out = output_profile(s, e, x)
+        out = output_profile(s, e, x)                    # full event, incl. the electron
         # Units: the model's amplitudes were FITTED to the G4 per-bin profiles
         # (shower_gamma_model.fit_profile: curve_fit(A*kernel(x), y)), so
         # amp * unit-area kernel evaluated at the bin centres is already in G4 units.
         # The analytic uses the same convention (model yield * unit-area kernel).
         r = [E_had, float(s["E_nu"][e])]
-        for test in (out, ana, g4B):
-            r += list(EV._l2_ks(g4A, test, sigma, binw))
+        refb = blur(np.array(ref), sigma, binw)          # blur the 100 references ONCE
+        for test in (out, ana, extra):
+            l2, ks = l2_ks_many(refb, test)
+            r += [float(np.nanmean(l2)), float(np.nanmean(ks))]
         rows.append(r)
         print(f"  {ch}: event {j + 1}/{len(events)}", end="\r")
     print(f"\n  {ch}: scored {len(rows)} events, skipped {n_skip} "
-          f"(> {max_missing:.0%} of the energy in species without a G4 library)")
+          f"(> {max_missing:.0%} of the hadronic energy in species without a G4 library)")
+    if missing_pids:
+        tot = sum(missing_pids.values())
+        print("  energy in species with no G4 library: " +
+              ", ".join(f"{pid}: {E / tot:.0%}" for pid, E in
+                        sorted(missing_pids.items(), key=lambda t: -t[1])))
     return np.array(rows, float)
 
 
-def l2ks_plot(rows, title, xlabel, path):
-    """rows: E, l2_gamma, ks_gamma, l2_analytic, ks_analytic, l2_floor, ks_floor."""
+def l2ks_plot(rows, title, xlabel, path, keys=CURVE_ORDER):
+    """rows: E, then (l2, ks) for each curve in CURVE_ORDER."""
     if len(rows) == 0:
         return
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8.2, 9.4), sharex=True)
     for ax, off in ((ax1, 0), (ax2, 1)):
-        for c, key in enumerate(("gamma", "analytic", "floor")):
+        for c, key in enumerate(CURVE_ORDER):
+            if key not in keys:
+                continue
             lab, col, mk, ls = CURVES[key]
             y = rows[:, 1 + 2 * c + off]
             ok = np.isfinite(y) & (y > 0)
@@ -228,7 +262,10 @@ def main():
     ap.add_argument("--tol", type=float, default=0.10, help="E_had window: +-tol (fractional)")
     ap.add_argument("--n", type=int, default=100, help="events per channel in F1/F2")
     ap.add_argument("--xlim", type=float, nargs=2, default=[0, 1600])
-    ap.add_argument("--g4-dir", default=None, help="dir of shower_*_E*GeV.h5 (enables F3)")
+    ap.add_argument("--g4-dir", nargs="+", default=None,
+                    help="dir(s) of shower_*_E*GeV.h5, merged (enables F3)")
+    ap.add_argument("--n-g4", type=int, default=100,
+                    help="G4 composites per event that each shower is compared with")
     ap.add_argument("--model", default=os.path.join(
         G.SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/shower_model.npz"))
     ap.add_argument("--max-events", type=int, default=2000, help="events per channel in F3")
@@ -272,11 +309,14 @@ def main():
     if args.g4_dir is None:
         print("no --g4-dir: skipping the L2/KS vs G4 figures")
         return
-    EV, C, lib = load_g4_tools(os.path.expanduser(args.g4_dir))
+    EV, C, lib = load_g4_tools([os.path.expanduser(d) for d in args.g4_dir])
     have = sorted(lib)
     print(f"G4 library species: {have}")
+    need = [111, 211, -211, 321, -321, 310, 130, 2212, 2112]
+    if [p for p in need if p not in lib]:
+        print(f"  WARNING: no G4 library for {[p for p in need if p not in lib]}")
     if 11 not in lib:
-        print("  WARNING: no electron (pid 11) G4 library -> CC events will be skipped")
+        raise SystemExit("no electron (shower_em_*) G4 library -- needed for the CC events")
     any_pid = next(iter(lib)); any_E = next(iter(lib[any_pid]))
     x = np.asarray(lib[any_pid][any_E]["z_centers"], float)
     binw = float(x[1] - x[0])
@@ -284,12 +324,12 @@ def main():
     model = hs.load_model(args.model)
     for ch, s in rng_s.items():
         rows = score_channel(EV, lib, model, s, ch, x, sigma, binw, rng,
-                             args.max_events, args.max_missing)
+                             args.max_events, args.max_missing, args.n_g4)
         os.makedirs(args.outdir, exist_ok=True)
         with open(os.path.join(args.outdir, f"ccnc_l2ks_{ch}.csv"), "w", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["E_had_GeV", "E_nu_GeV", "l2_gamma", "ks_gamma",
-                        "l2_analytic", "ks_analytic", "l2_floor", "ks_floor"])
+            w.writerow(["E_had_GeV", "E_nu_GeV"] +
+                       [f"{m}_{k}" for k in CURVE_ORDER for m in ("l2", "ks")])
             w.writerows(rows.tolist())
         if len(rows) == 0:
             continue
