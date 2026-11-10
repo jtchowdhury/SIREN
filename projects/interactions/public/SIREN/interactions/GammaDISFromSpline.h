@@ -93,6 +93,11 @@ private:
              std::vector<dataclasses::InteractionSignature>> gamma_signatures_by_parents_;
     int kMaxSub_ = 0;                                    // padded max # of subshower slots
 
+    // CC (1) / NC (2) as used by GammaDIS. 0 = take the base's value. Needed because
+    // spline files without an INTERACTION key make the base silently assume CC
+    // (the CSMS splines have none); set from the file name or SetInteractionType().
+    int interaction_type_override_ = 0;
+
     bool loaded_ = false;
 
 public:
@@ -152,6 +157,11 @@ public:
     void LoadPythiaEvents(std::string const & npz_path);
     bool HasSpecies(int pid) const { return species_.count(pid) > 0; }
     double YieldMean(int pid, double E_GeV) const;
+
+    // CC/NC actually used by GammaDIS (override if set, else the base's value),
+    // and an explicit setter (1 = CC, 2 = NC; rebuilds the signatures).
+    int InteractionType() const;
+    void SetInteractionType(int interaction_type);
 
     // Sample 1 particle's gamma mixture: returns its components (alpha, beta, amplitude = N * weight_i)
     std::vector<Component> SampleShower(

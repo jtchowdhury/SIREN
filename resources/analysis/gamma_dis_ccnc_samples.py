@@ -37,10 +37,12 @@ def load_xs(channel):
         "CSMSDISSplines", primary_types=[NUE], target_types=[NUCLEON], isoscalar=True,
         process_types=[channel.upper()], shower_model_path=MODEL, pythia_events_path=PYTHIA)
     xs = procs[NUE]
-    it = getattr(xs[0], "GetInteractionType", None)
-    if it is not None and it() != ITYPE[channel]:
-        raise RuntimeError(f"{channel}: spline says interaction type {it()}, "
-                           f"expected {ITYPE[channel]}")
+    for x in xs:
+        # GammaDIS already detects NC from the file name; set it explicitly anyway
+        if x.InteractionType() != ITYPE[channel]:
+            print(f"  note: {channel}: GammaDIS reported type {x.InteractionType()}, "
+                  f"setting {ITYPE[channel]}")
+            x.SetInteractionType(ITYPE[channel])
     return xs
 
 
@@ -109,11 +111,16 @@ def main():
     ap.add_argument("--emin", type=float, default=1e2)
     ap.add_argument("--emax", type=float, default=1e6)
     ap.add_argument("--outdir", default="output/gamma_dis_samples")
+    ap.add_argument("--channels", nargs="+", choices=["cc", "nc"], default=["cc", "nc"])
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
     detector = siren.utilities.load_detector("IceCube")
     seed = 5000
     for ch in ("cc", "nc"):
+        if ch not in args.channels:
+            seed += (len(args.energies) if args.which in ("mono", "all") else 0) + \
+                    (1 if args.which in ("range", "all") else 0)    # keep seeds stable
+            continue
         if args.which in ("mono", "all"):
             for E in args.energies:
                 seed += 1

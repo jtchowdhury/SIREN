@@ -1,6 +1,7 @@
 #include "SIREN/interactions/GammaDISFromSpline.h"
 
 #include <cmath>
+#include <cctype>
 #include <array>
 #include <tuple>
 #include <string>
@@ -152,8 +153,29 @@ GammaDISFromSpline::GammaDISFromSpline(
                     primary_types, target_types, units),
       shower_model_path_(shower_model_path),
       pythia_events_path_(pythia_events_path) {
+    // The base read the interaction type from the spline's INTERACTION key and
+    // silently falls back to CC (1) when the key is missing -- which it is in the
+    // CSMS splines, so NC files come out as CC. Use the file name as a fallback:
+    // "..._NC_..." / "..._NC.fits" -> NC. (The long ctor takes the type explicitly.)
+    std::string base = differential_filename.substr(differential_filename.find_last_of("/\\") + 1);
+    for(char & ch : base) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    if(GetInteractionType() == 1 &&
+       (base.find("_NC_") != std::string::npos || base.find("_NC.") != std::string::npos))
+        interaction_type_override_ = 2;
     LoadShowerModel(shower_model_path_);
     LoadPythiaEvents(pythia_events_path_);
+    InitializeGammaSignatures();
+}
+
+int GammaDISFromSpline::InteractionType() const {
+    return interaction_type_override_ ? interaction_type_override_ : GetInteractionType();
+}
+
+void GammaDISFromSpline::SetInteractionType(int interaction_type) {
+    if(interaction_type != 1 && interaction_type != 2)
+        throw std::runtime_error("GammaDISFromSpline::SetInteractionType: use 1 (CC) or 2 (NC), got "
+                                 + std::to_string(interaction_type));
+    interaction_type_override_ = interaction_type;
     InitializeGammaSignatures();
 }
 
@@ -514,7 +536,7 @@ void GammaDISFromSpline::InitializeGammaSignatures() {
     std::vector<siren::dataclasses::ParticleType> primaries = GetPossiblePrimaries();   // base impl (configured types)
     std::vector<siren::dataclasses::ParticleType> targets   = GetPossibleTargets();
     for(siren::dataclasses::ParticleType primary : primaries) {
-        int lep = outgoing_lepton_pdg(primary, GetInteractionType());
+        int lep = outgoing_lepton_pdg(primary, InteractionType());
         bool shower_lepton = (std::abs(lep) == 11);   // only e+- showered (CC nu_e); NC nu / mu / tau -> real track
         dataclasses::InteractionSignature sig;
         sig.primary_type = primary;
@@ -663,7 +685,7 @@ void GammaDISFromSpline::SampleFinalState(
     std::shared_ptr<siren::utilities::SIREN_random> random) const {
 
     siren::dataclasses::ParticleType primary = record.signature.primary_type;
-    int lep_pdg = outgoing_lepton_pdg(primary, GetInteractionType()); // CC: e/mu/tau, NC: the neutrino
+    int lep_pdg = outgoing_lepton_pdg(primary, InteractionType()); // CC: e/mu/tau, NC: the neutrino
     double m = DISFromSpline::GetLeptonMass(static_cast<siren::dataclasses::ParticleType>(lep_pdg));  // secondary lepton mass
     bool shower_lepton = (std::abs(lep_pdg) == ELECTRON_PDG); // only e+- showered
 
@@ -839,7 +861,7 @@ double GammaDISFromSpline::DifferentialCrossSection(
     rk::P4 p2(geom3::Vector3(0, 0, 0), interaction.target_mass);
     double primary_energy = interaction.primary_momentum[0];
 
-    int lep_pdg = outgoing_lepton_pdg(interaction.signature.primary_type, GetInteractionType());
+    int lep_pdg = outgoing_lepton_pdg(interaction.signature.primary_type, InteractionType());
     double lepton_mass = DISFromSpline::GetLeptonMass(static_cast<PT>(lep_pdg));
     rk::P4 p3(geom3::Vector3(get("lep_px"), get("lep_py"), get("lep_pz")), lepton_mass);
 
