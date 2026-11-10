@@ -25,8 +25,9 @@ F3  L2 / KS vs E_had (and vs E_nu), one figure per channel.
     identical to compare_event_vs_g4.py.
 
 Analytic formula (profile in depth x [cm], t = x / X0):
-  hadronic blob:  Gamma(t; a, b), a = 0.3 + 0.7 ln(E / 0.2 GeV), b = 0.9,
-                  X0 = 39.15 cm   (the "Current Analytic Approx." of compare_methods.py),
+  hadronic blob:  Aachen pi+ profile (Raedel & Wiebusch Geant4 parametrization for
+                  ice, as implemented in fennel): Gamma(t; a, b), t = x / X0,
+                  a = 1.81098 + 0.90572 log10(E/GeV), b = 0.34347, X0 = 39.30 cm,
                   E = E_had - nucleon mass (kinetic), scaled to the model's mean
                   pi+ yield at E. KS does not depend on that scale; L2 does.
 
@@ -57,7 +58,8 @@ CURVES = {"gamma":    ("GammaDISFromSpline vs G4", "#F08070", "o", "-"),
 CURVE_ORDER = ("gamma", "analytic", "floor")    # column order in the rows
 
 # analytic constants (see docstring)
-HAD_EC_GEV, HAD_BETA, HAD_X0_CM = 0.2, 0.9, 36.08 / 0.9216
+AACHEN_PIP_ALPHA, AACHEN_PIP_BETA, AACHEN_PIP_B = 1.81098, 0.90572, 0.34347
+AACHEN_X0_CM = 36.08 / 0.9180      # fennel: X0 = 36.08 g/cm^2, ice density 0.918 g/cm^3
 M_NUCLEON = 0.5 * (G.REST_MASS[2212] + G.REST_MASS[2112])   # isoscalar target
 
 
@@ -77,8 +79,12 @@ def output_profile(s, e, x, hadrons_only=False):
 
 
 def analytic_had(x, E, yield_tot):
-    a = max(0.3 + 0.7 * np.log(E / HAD_EC_GEV), 1e-3)
-    return yield_tot * hs._kernel(x / HAD_X0_CM, a, HAD_BETA) / HAD_X0_CM   # unit area in cm
+    """Aachen (Raedel & Wiebusch, Geant4 in ice) pi+ longitudinal profile, as
+    implemented in fennel (fennel/data/aachen.pkl, 'hadron cascade' ->
+    'longitudinal parameters' -> 211):  Gamma(t; a, b), t = x / X0,
+    a = 1.81098 + 0.90572 log10(E/GeV), b = 0.34347. Unit area in cm, times yield."""
+    a = max(AACHEN_PIP_ALPHA + AACHEN_PIP_BETA * np.log10(E), 1e-3)
+    return yield_tot * hs._kernel(x / AACHEN_X0_CM, a, AACHEN_PIP_B) / AACHEN_X0_CM
 
 
 def mean_yield(model, species, E):
