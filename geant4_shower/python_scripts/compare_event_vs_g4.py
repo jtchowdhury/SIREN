@@ -117,9 +117,11 @@ def _analytic_profile(x, E, yield_tot):
     alpha = 0.3 + 0.7 * np.log(E / C.HAD_EC_GEV)
     beta = 0.9
     t = np.asarray(x, float) / C.X0_ICE_CM
-    shape = _kernel(t, alpha, beta)
-    s = shape.sum()
-    return shape / s * yield_tot if s > 0 else shape
+    # Unit area per cm (kernel in t, divided by X0), times the yield: the SAME
+    # convention as the sampled model (N * unit-area kernel), whose N was fitted
+    # to the G4 per-bin profiles. (Normalising the bin SUM to N instead, as
+    # before, gave the analytic binwidth-times too much light.)
+    return yield_tot * _kernel(t, alpha, beta) / C.X0_ICE_CM
 
 
 def _g4_draw(lib, pid, E, rng):

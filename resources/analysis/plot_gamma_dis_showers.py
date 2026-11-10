@@ -135,6 +135,7 @@ def main():
                 pid, E = int(s["had_pid"][h0 + p]), float(s["had_p"][h0 + p, 0])
             else:
                 pid, E = 11, float(s["lep"][e, 0])
+            E = G.e_kin(pid, E)          # model is labelled by kinetic energy (as the C++ uses)
             if not model.has(pid) or E <= 0:
                 continue
             sel = np.arange(a, b)[parents == p]

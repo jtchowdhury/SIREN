@@ -54,6 +54,16 @@ namespace {
         return 0;
     }
 
+    // outgoing lepton PDG for the spline's interaction type (same rule as
+    // DISFromSpline::InitializeSignatures): 1 = CC -> charged lepton,
+    // 2 = NC -> the neutrino itself (massless, invisible, kept as a real track).
+    int outgoing_lepton_pdg(siren::dataclasses::ParticleType nu, int interaction_type) {
+        if(interaction_type == 1) return charged_lepton_pdg(nu);
+        if(interaction_type == 2) return static_cast<int>(nu);
+        throw std::runtime_error("GammaDISFromSpline: only CC (1) and NC (2) splines are supported, got interaction type "
+                                 + std::to_string(interaction_type));
+    }
+
     // standard normal via Box-Muller from SIREN_random::Uniform 
     // (keeps us off any particular Gaussian API; statistically identical)
     double draw_normal(std::shared_ptr<siren::utilities::SIREN_random> r) {
@@ -66,6 +76,64 @@ namespace {
         // K0/K0bar -> KS(310)/KL(130) 50/50 (mirrors load_final_state_h5)
         if(std::abs(pid) == 311) return (r->Uniform(0.0,1.0) < 0.5) ? 310 : 130;
         return pid;
+    }
+
+    // PDG rest masses [GeV] of the shower-model species. The G4 showers the model
+    // was trained on are labelled by KINETIC energy (PrimaryGeneratorAction:
+    // SetParticleEnergy), while the boosted hadrons carry TOTAL energy, so the
+    // model is called with E_kin = E - m. Unknown species -> 0 (no change).
+    double rest_mass_GeV(int pid) {
+        switch(std::abs(pid)) {
+            case 11:   return 0.51099895e-3;   // e
+            case 22:   return 0.0;             // photon
+            case 111:  return 0.1349768;       // pi0
+            case 211:  return 0.13957039;      // pi+-
+            case 130: case 310: case 311:
+                       return 0.497611;        // K0 / KS / KL
+            case 321:  return 0.493677;        // K+-
+            case 2212: return 0.93827208816;   // p, pbar
+            case 2112: return 0.93956542052;   // n, nbar
+            default:   return 0.0;
+        }
+    }
+
+    // Eigen-decomposition of a small symmetric matrix (cyclic Jacobi rotations).
+    // a: n x n row-major. Returns eigenvalues w and eigenvectors as COLUMNS of V
+    // (V[i*n+k] = component i of eigenvector k), so A = V diag(w) V^T.
+    // Checked against numpy.linalg.eigh to ~1e-14 for n = 2..8.
+    void symmetric_eigen(std::vector<double> a, int n,
+                         std::vector<double> & w, std::vector<double> & V) {
+        V.assign(n * n, 0.0);
+        for(int i = 0; i < n; ++i) V[i*n+i] = 1.0;
+        for(int sweep = 0; sweep < 100; ++sweep) {
+            double off = 0.0;
+            for(int p = 0; p < n; ++p)
+                for(int q = p+1; q < n; ++q) off += a[p*n+q] * a[p*n+q];
+            if(off < 1e-30) break;
+            for(int p = 0; p < n; ++p) {
+                for(int q = p+1; q < n; ++q) {
+                    double apq = a[p*n+q];
+                    if(std::abs(apq) < 1e-300) continue;
+                    double th = (a[q*n+q] - a[p*n+p]) / (2.0 * apq);
+                    double t = (th >= 0 ? 1.0 : -1.0) / (std::abs(th) + std::sqrt(th*th + 1.0));
+                    double c = 1.0 / std::sqrt(t*t + 1.0), s = t * c;
+                    for(int k = 0; k < n; ++k) {
+                        double akp = a[k*n+p], akq = a[k*n+q];
+                        a[k*n+p] = c*akp - s*akq;  a[k*n+q] = s*akp + c*akq;
+                    }
+                    for(int k = 0; k < n; ++k) {
+                        double apk = a[p*n+k], aqk = a[q*n+k];
+                        a[p*n+k] = c*apk - s*aqk;  a[q*n+k] = s*apk + c*aqk;
+                    }
+                    for(int k = 0; k < n; ++k) {
+                        double vkp = V[k*n+p], vkq = V[k*n+q];
+                        V[k*n+p] = c*vkp - s*vkq;  V[k*n+q] = s*vkp + c*vkq;
+                    }
+                }
+            }
+        }
+        w.resize(n);
+        for(int i = 0; i < n; ++i) w[i] = a[i*n+i];
     }
 } // namespace
 
@@ -336,33 +404,30 @@ std::vector<GammaDISFromSpline::Component> GammaDISFromSpline::SampleShower(
     for(int c = 0; c < dim*dim; ++c)
         cov[c] = interp1d_(s.logE, covbuf.data(), dim*dim, c, lq);
 
-    // symmetrize + diagonal ridge (PSD safeguard; Python clips eigenvalues to
-    // COV_RIDGE, here we add it to the diagonal before Cholesky)
+    // symmetrize, then clip the EIGENVALUES at COV_RIDGE -- exactly what the
+    // Python model does (hadronic_showers._mean_cov). An earlier version added
+    // COV_RIDGE to every diagonal element instead, which inflated every
+    // parameter's spread by a few percent.
     for(int a = 0; a < dim; ++a)
         for(int b = a+1; b < dim; ++b) {
             double v = 0.5 * (cov[a*dim+b] + cov[b*dim+a]);
             cov[a*dim+b] = cov[b*dim+a] = v;
         }
-    for(int a = 0; a < dim; ++a) cov[a*dim+a] += COV_RIDGE;
+    std::vector<double> evals, evecs;           // evecs: column k = eigenvector k
+    symmetric_eigen(cov, dim, evals, evecs);
+    for(auto & e : evals) e = std::max(e, COV_RIDGE);
 
-    // ---- Cholesky cov = L L^T ---------------------------------------------
-    std::vector<double> L(dim * dim, 0.0);
-    for(int a = 0; a < dim; ++a) {
-        for(int b = 0; b <= a; ++b) {
-            double sum = cov[a*dim + b];
-            for(int k = 0; k < b; ++k) sum -= L[a*dim+k] * L[b*dim+k];
-            if(a == b) L[a*dim+b] = std::sqrt(std::max(sum, 1e-12));
-            else       L[a*dim+b] = sum / L[b*dim+b];
-        }
-    }
-
-    // ---- z = mean + L g,  g ~ N(0,1); then clip to +-CLIP_SIGMA ------------
+    // ---- z = mean + V sqrt(lambda) g,  g ~ N(0,1); clip to +-CLIP_SIGMA -----
+    // sd uses the clipped covariance V lambda V^T, as in Python.
     std::vector<double> g(dim), z(dim);
     for(int a = 0; a < dim; ++a) g[a] = draw_normal(random);
     for(int a = 0; a < dim; ++a) {
-        double v = mean[a];
-        for(int b = 0; b <= a; ++b) v += L[a*dim+b] * g[b];
-        double sd = std::sqrt(std::max(cov[a*dim+a], 0.0));
+        double v = mean[a], var = 0.0;
+        for(int k = 0; k < dim; ++k) {
+            v   += evecs[a*dim+k] * std::sqrt(evals[k]) * g[k];
+            var += evecs[a*dim+k] * evecs[a*dim+k] * evals[k];
+        }
+        double sd = std::sqrt(std::max(var, 0.0));
         z[a] = std::min(std::max(v, mean[a] - CLIP_SIGMA*sd), mean[a] + CLIP_SIGMA*sd);
     }
 
@@ -449,8 +514,8 @@ void GammaDISFromSpline::InitializeGammaSignatures() {
     std::vector<siren::dataclasses::ParticleType> primaries = GetPossiblePrimaries();   // base impl (configured types)
     std::vector<siren::dataclasses::ParticleType> targets   = GetPossibleTargets();
     for(siren::dataclasses::ParticleType primary : primaries) {
-        int lep = charged_lepton_pdg(primary);
-        bool shower_lepton = (std::abs(lep) == 11);   // only e+- showered
+        int lep = outgoing_lepton_pdg(primary, GetInteractionType());
+        bool shower_lepton = (std::abs(lep) == 11);   // only e+- showered (CC nu_e); NC nu / mu / tau -> real track
         dataclasses::InteractionSignature sig;
         sig.primary_type = primary;
         if(!shower_lepton)
@@ -598,7 +663,7 @@ void GammaDISFromSpline::SampleFinalState(
     std::shared_ptr<siren::utilities::SIREN_random> random) const {
 
     siren::dataclasses::ParticleType primary = record.signature.primary_type;
-    int lep_pdg = charged_lepton_pdg(primary); // secondary lepton PDG
+    int lep_pdg = outgoing_lepton_pdg(primary, GetInteractionType()); // CC: e/mu/tau, NC: the neutrino
     double m = DISFromSpline::GetLeptonMass(static_cast<siren::dataclasses::ParticleType>(lep_pdg));  // secondary lepton mass
     bool shower_lepton = (std::abs(lep_pdg) == ELECTRON_PDG); // only e+- showered
 
@@ -685,7 +750,7 @@ void GammaDISFromSpline::SampleFinalState(
     auto & secondaries = record.GetSecondaryParticleRecords();
     size_t slot = 0;
 
-    // mu/tau: keep the lepton as a real track in slot 0 (exactly like DIS)
+    // mu/tau (CC) or the outgoing neutrino (NC): keep the lepton as a real track in slot 0 (exactly like DIS)
     if(!shower_lepton && !secondaries.empty()) {
         secondaries[slot].SetFourMomentum({p3.e(), p3.px(), p3.py(), p3.pz()});
         secondaries[slot].SetMass(p3.m());
@@ -714,7 +779,11 @@ void GammaDISFromSpline::SampleFinalState(
 
         // GammaSubshower secondaries: 4-mom = [amplitude, alpha, beta, parent_index]
         // parent_index i -> look up hadron<i>_pid / hadron<i>_E; -1 = the electron.
-        std::vector<Component> comps = SampleShower(pid, q[0], random);
+        // shower model is labelled by KINETIC energy (G4 gun) -> E_kin = E - m.
+        // (hadron<i>_E above keeps the TOTAL energy, for the conservation check.)
+        double E_kin = q[0] - rest_mass_GeV(pid);
+        std::vector<Component> comps;
+        if(E_kin > 0.0) comps = SampleShower(pid, E_kin, random);
         for(auto & c : comps) {
             if(slot >= secondaries.size()) break;   // bounded by kMaxSub_; drop overflow
             secondaries[slot].SetFourMomentum(
@@ -728,7 +797,7 @@ void GammaDISFromSpline::SampleFinalState(
 
     // CC nu_e: shower the scattered electron too (its 4-mom is already lep_*)
     if(shower_lepton && HasSpecies(ELECTRON_PDG)) {
-        std::vector<Component> comps = SampleShower(ELECTRON_PDG, p3.e(), random);
+        std::vector<Component> comps = SampleShower(ELECTRON_PDG, p3.e() - rest_mass_GeV(ELECTRON_PDG), random);
         for(auto & c : comps) {
             if(slot >= secondaries.size()) break;
             secondaries[slot].SetFourMomentum(
@@ -770,7 +839,7 @@ double GammaDISFromSpline::DifferentialCrossSection(
     rk::P4 p2(geom3::Vector3(0, 0, 0), interaction.target_mass);
     double primary_energy = interaction.primary_momentum[0];
 
-    int lep_pdg = charged_lepton_pdg(interaction.signature.primary_type);
+    int lep_pdg = outgoing_lepton_pdg(interaction.signature.primary_type, GetInteractionType());
     double lepton_mass = DISFromSpline::GetLeptonMass(static_cast<PT>(lep_pdg));
     rk::P4 p3(geom3::Vector3(get("lep_px"), get("lep_py"), get("lep_pz")), lepton_mass);
 

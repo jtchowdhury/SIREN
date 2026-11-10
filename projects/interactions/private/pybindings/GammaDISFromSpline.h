@@ -58,5 +58,6 @@ void register_GammaDISFromSpline(pybind11::module_ & m) {
         .def("LoadPythiaEvents", &GammaDISFromSpline::LoadPythiaEvents)
         .def("HasSpecies", &GammaDISFromSpline::HasSpecies)
         .def("YieldMean", &GammaDISFromSpline::YieldMean)
+        .def("GetInteractionType", &GammaDISFromSpline::GetInteractionType)   // 1 = CC, 2 = NC
         .def("SampleFinalState", &GammaDISFromSpline::SampleFinalState);
 }

@@ -15,6 +15,18 @@ SIREN_ROOT = os.environ.get("SIREN_ROOT", os.path.expanduser("~/SIREN"))
 ELECTRON_MASS = 0.51099895e-3   # GeV; replaced by SIREN's constant when siren is importable
 GAMMASUB = -2000002200          # ParticleType::GammaSubshower
 
+# PDG rest masses [GeV], same table as rest_mass_GeV() in GammaDISFromSpline.cxx.
+# The shower model / G4 library are labelled by KINETIC energy; SIREN stores TOTAL.
+REST_MASS = {11: 0.51099895e-3, 22: 0.0, 111: 0.1349768, 211: 0.13957039,
+             130: 0.497611, 310: 0.497611, 311: 0.497611, 321: 0.493677,
+             2212: 0.93827208816, 2112: 0.93956542052}
+
+
+def e_kin(pid, E):
+    """Kinetic energy for the shower model from a total energy (same rule as the C++)."""
+    return E - REST_MASS.get(abs(int(pid)), 0.0)
+
+
 COLORS = {"gamma": "#F08070", "dis": "#4682B4", "theory": "#222222",
           "floor": "#444444", "test": "#F08070", "ref": "#4682B4"}
 LABELS = {"gamma": "GammaDISFromSpline", "dis": "DISFromSpline",
