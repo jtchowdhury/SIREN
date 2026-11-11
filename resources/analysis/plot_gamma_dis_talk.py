@@ -33,13 +33,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
+from matplotlib.ticker import ScalarFormatter
 
 import gamma_dis_common as G
 import plot_gamma_dis_ccnc as P          # profiles, Aachen pi+, G4 library tools
 import hadronic_showers as hs
 
 # colours of the reference figure: e- / CC blue, pi+ / NC orange
-C_BLUE, C_ORANGE = "#3a87b0", "#e0861a"
+C_BLUE, C_ORANGE = "#4c78a8", "#f58518"   # hadronic_showers.plot_overlay colours
 # Aachen e- longitudinal profile (fennel aachen.pkl, 'em cascade' -> 11)
 AACHEN_E_ALPHA, AACHEN_E_BETA, AACHEN_E_B = 2.01849, 1.45469, 0.63207
 
@@ -60,24 +61,23 @@ def conv(y, sigma_cm, binw):
 
 
 def spaghetti(x, groups, path, xlim, legend_title=None):
-    """groups: list of (list of profiles, colour, label). One file per call."""
-    fig, ax = plt.subplots(figsize=(5.8, 5.6))
+    """groups: list of (list of profiles, colour, label). One file per call.
+    Style of hadronic_showers.plot_overlay (the e- vs pi+ figure), plus a legend title."""
+    fig, ax = plt.subplots(figsize=(8, 6))
     for profs, col, lab in groups:
         for i, y in enumerate(profs):
-            ax.plot(x, norm(x, y), color=col, lw=0.8, alpha=0.55,
+            ax.plot(x, norm(x, y), color=col, lw=0.5, alpha=0.5,
                     label=lab if i == 0 else None)
     ax.set_xlim(*xlim)
-    ax.set_ylim(bottom=0)
-    ax.set_xlabel(r"$x$ [cm]", fontsize=16)
-    ax.set_ylabel(r"$\hat{\ell}_{\mathrm{tot}}^{-1}\mathrm{d}\hat{\ell}/\mathrm{d}x$ [1/cm]",
-                  fontsize=16)
-    ax.ticklabel_format(axis="both", style="sci", scilimits=(0, 0))
-    ax.tick_params(direction="in", top=True, right=True, labelsize=14, length=5)
-    ax.xaxis.get_offset_text().set_fontsize(13)
-    ax.yaxis.get_offset_text().set_fontsize(13)
-    leg = ax.legend(fontsize=12, title=legend_title, title_fontsize=12, framealpha=0.9)
-    for lh in leg.get_lines():
-        lh.set_linewidth(1.6); lh.set_alpha(1.0)
+    ax.set_xlabel(hs.XLABEL, fontsize=16)
+    ax.set_ylabel(hs.YLABEL, fontsize=16)
+    ax.tick_params(labelsize=14)
+    fmt = ScalarFormatter(useMathText=True)
+    fmt.set_scientific(True)
+    fmt.set_powerlimits((0, 0))
+    ax.yaxis.set_major_formatter(fmt)
+    ax.legend(fontsize=14, title=legend_title, title_fontsize=14)
+    ax.grid(alpha=0.3)
     fig.tight_layout()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     fig.savefig(path, dpi=200)
@@ -97,7 +97,7 @@ def main():
     ap.add_argument("--enu", type=float, nargs="+", default=[1e4, 1e5])
     ap.add_argument("--n", type=int, default=100)
     ap.add_argument("--sigma-cm", type=float, default=45.0)
-    ap.add_argument("--xlim-single", type=float, nargs=2, default=[0, 1500])
+    ap.add_argument("--xlim-single", type=float, nargs=2, default=[0, 1600])
     ap.add_argument("--xlim-events", type=float, nargs=2, default=[0, 2000])
     ap.add_argument("--seed", type=int, default=3)
     args = ap.parse_args()
@@ -130,7 +130,7 @@ def main():
               out(f"single_g4_{tag}.png"), args.xlim_single, conv_title)
     spaghetti(x, [([model.sample(n, E1, rng, x=x).photons for _ in range(args.n)], c, l)
                   for _p, n, c, l in sp],
-              out("single_sampled.png"), args.xlim_single, "Gamma-mixture model")
+              out("single_sampled.png"), args.xlim_single, "Sampled Gamma Shower")
 
     # ---------------- neutrino events ----------------
     for Enu in args.enu:
@@ -172,12 +172,12 @@ def main():
                                            for ch, col in (("cc", C_BLUE), ("nc", C_ORANGE))]
         stem = f"events_E{Enu:.0e}"
         spaghetti(x, grp("sampled"), out(f"{stem}_sampled.png"), args.xlim_events,
-                  "GammaDISFromSpline")
+                  "Sampled Gamma Shower")
         spaghetti(x, grp("g4"), out(f"{stem}_g4_raw.png"), args.xlim_events, "Geant4")
         spaghetti(x, grp("g4", lambda y: conv(y, args.sigma_cm, binw)),
                   out(f"{stem}_g4_{tag}.png"), args.xlim_events, conv_title)
         spaghetti(x, grp("analytic"), out(f"{stem}_analytic.png"), args.xlim_events,
-                  "DISFromSpline + analytic profile")
+                  "Fixed Analytical Shower")
 
 
 if __name__ == "__main__":
