@@ -66,8 +66,9 @@ KMAX_DEFAULT = 3
 MIN_SAMPLES_FOR_COV = 12   # min runs at an (m, E) to estimate a covariance
 BIC_RES_CM = 45.0          # detector depth resolution: used only to set the honest
                            # BIC sample count (resolvable elements, not raw bins)
-GATE_MIN_WEIGHT = 0.20     # veto m=2 unless the smaller component is >=20% of the
-                           # bigger one (ratio min(w)/max(w))
+GATE_MIN_WEIGHT = 0.05     # veto m=2 unless the smaller component is >=5% of the
+                           # bigger one (ratio min(w)/max(w)); was 0.20, which threw
+                           # away small late sub-showers that G4 does produce
 
 # --- peak-resolution length L_char(E): the separation two sub-cascade peaks need
 #     before a SHOULDER appears in the summed profile. In sigma_z units this onset
@@ -558,9 +559,7 @@ class ShowerSampler:
         p = np.array([pm[m - 1] for m in avail]); p = p / p.sum()
         m = int(rng.choice(avail, p=p))
         mean, cov = self.interp.mean_cov(pid, E, m, nov)
-        z = rng.multivariate_normal(mean, cov)
-        sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
-        z = np.clip(z, mean - 2.5 * sd, mean + 2.5 * sd)   # truncate fat Gaussian tails
+        z = rng.multivariate_normal(mean, cov)   # no +-2.5 sigma clip: it cut off late showers
         w, alpha, beta = _from_z(z, m)
         return m, w, alpha, beta
 

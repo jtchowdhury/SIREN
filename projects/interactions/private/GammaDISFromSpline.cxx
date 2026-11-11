@@ -24,7 +24,6 @@ namespace siren {
 namespace interactions {
 
 namespace {
-    constexpr double CLIP_SIGMA = 2.5;   // matches training (hadronic_showers._CLIP_SIGMA)
     constexpr double COV_RIDGE  = 1e-3;  // PSD floor (hadronic_showers._COV_RIDGE)
     constexpr int    HADRONS_PDG = -2000001006;
     constexpr int    ELECTRON_PDG = 11;
@@ -439,18 +438,16 @@ std::vector<GammaDISFromSpline::Component> GammaDISFromSpline::SampleShower(
     symmetric_eigen(cov, dim, evals, evecs);
     for(auto & e : evals) e = std::max(e, COV_RIDGE);
 
-    // ---- z = mean + V sqrt(lambda) g,  g ~ N(0,1); clip to +-CLIP_SIGMA -----
-    // sd uses the clipped covariance V lambda V^T, as in Python.
+    // ---- z = mean + V sqrt(lambda) g,  g ~ N(0,1) --------------------------
+    // No +-2.5 sigma clip any more (it cut off late-starting showers); matches
+    // hadronic_showers.sample and shower_gamma_model.ShowerSampler.
     std::vector<double> g(dim), z(dim);
     for(int a = 0; a < dim; ++a) g[a] = draw_normal(random);
     for(int a = 0; a < dim; ++a) {
-        double v = mean[a], var = 0.0;
-        for(int k = 0; k < dim; ++k) {
-            v   += evecs[a*dim+k] * std::sqrt(evals[k]) * g[k];
-            var += evecs[a*dim+k] * evecs[a*dim+k] * evals[k];
-        }
-        double sd = std::sqrt(std::max(var, 0.0));
-        z[a] = std::min(std::max(v, mean[a] - CLIP_SIGMA*sd), mean[a] + CLIP_SIGMA*sd);
+        double v = mean[a];
+        for(int k = 0; k < dim; ++k)
+            v += evecs[a*dim+k] * std::sqrt(evals[k]) * g[k];
+        z[a] = v;
     }
 
     std::vector<double> w, alpha, beta;

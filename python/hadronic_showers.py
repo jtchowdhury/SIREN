@@ -74,7 +74,6 @@ DEFAULT_PYTHIA = os.path.join(
 
 _trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
 
-_CLIP_SIGMA = 2.5      # truncate the sampled Gaussian at +-2.5 sigma (matches training)
 _COV_RIDGE = 1e-3      # PSD floor on covariance eigenvalues (matches training)
 
 
@@ -318,9 +317,7 @@ class HadronicShowerModel:
         m = int(rng.choice(avail, p=p))
 
         mean, cov = self._mean_cov(entry, m, lq)
-        z = rng.multivariate_normal(mean, cov)
-        sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
-        z = np.clip(z, mean - _CLIP_SIGMA * sd, mean + _CLIP_SIGMA * sd)
+        z = rng.multivariate_normal(mean, cov)   # no clip (matches training and the C++)
         w, alpha, beta = _from_z(z, m)
 
         if N is None:
