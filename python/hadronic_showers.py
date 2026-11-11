@@ -114,6 +114,27 @@ def _from_z(z, m):
     return w, np.asarray(a, float), np.asarray(b, float)
 
 
+# Redraw parameter sets that are unphysical instead of clipping them (identical to
+# shower_gamma_model.draw_physical_z and GammaDISFromSpline.cxx): every component
+# must have alpha > 1 (no spike at the vertex) and must not be more than
+# _EARLY_SIGMA sigma too EARLY or too NARROW. The late / wide side is unbounded.
+_EARLY_SIGMA = 2.5
+_MAX_TRIES = 100
+
+
+def _draw_physical_z(mean, cov, m, rng):
+    mean = np.asarray(mean, float)
+    sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    idx = [0, 1] if m == 1 else list(range(m - 1, 3 * m - 1))   # all lc and ls entries
+    for _ in range(_MAX_TRIES):
+        z = rng.multivariate_normal(mean, cov)
+        if np.any(z[idx] < mean[idx] - _EARLY_SIGMA * sd[idx]):
+            continue
+        if np.all(_from_z(z, m)[1] > 1.0):
+            return z
+    return mean.copy()
+
+
 class _Const:
     """Constant curve: returns the stored value for any energy. Used for a
     species trained at a single energy (e.g. electron at just 1 TeV), where a
@@ -317,7 +338,7 @@ class HadronicShowerModel:
         m = int(rng.choice(avail, p=p))
 
         mean, cov = self._mean_cov(entry, m, lq)
-        z = rng.multivariate_normal(mean, cov)   # no clip (matches training and the C++)
+        z = _draw_physical_z(mean, cov, m, rng)   # same rule as training and the C++
         w, alpha, beta = _from_z(z, m)
 
         if N is None:

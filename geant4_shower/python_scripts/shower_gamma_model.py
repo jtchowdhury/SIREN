@@ -544,6 +544,42 @@ class ShowerParamInterpolator:
 # ===========================================================================
 #  MODULE C : sampler
 # ===========================================================================
+EARLY_SIGMA = 2.5     # reject draws more than this many sigma EARLY or NARROW
+MAX_TRIES = 100
+
+
+def _lc_ls_index(m):
+    """Positions of (log centroid, log width) of each component inside z."""
+    if m == 1:
+        return [0], [1]
+    return list(range(m - 1, 2 * m - 1)), list(range(2 * m - 1, 3 * m - 1))
+
+
+def is_physical_z(z, mean, sd, m):
+    """Accept a parameter draw only if every component (a) has alpha > 1, i.e. the
+    curve starts at 0 at the vertex instead of spiking there, and (b) is not more
+    than EARLY_SIGMA sigma too EARLY or too NARROW. The late / wide side is left
+    unbounded, so late-starting showers are kept."""
+    ilc, ils = _lc_ls_index(m)
+    for k in ilc + ils:
+        if z[k] < mean[k] - EARLY_SIGMA * sd[k]:
+            return False
+    _w, alpha, _b = _from_z(z, m)
+    return bool(np.all(np.asarray(alpha) > 1.0))
+
+
+def draw_physical_z(mean, cov, m, rng):
+    """Gaussian draw, redrawn until physical (see is_physical_z). Falls back to the
+    mean after MAX_TRIES, which essentially never happens."""
+    mean = np.asarray(mean, float)
+    sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    for _ in range(MAX_TRIES):
+        z = rng.multivariate_normal(mean, cov)
+        if is_physical_z(z, mean, sd, m):
+            return z
+    return mean.copy()
+
+
 class ShowerSampler:
     def __init__(self, interp, Kmax=KMAX_DEFAULT, no_valley=False):
         self.interp = interp
@@ -559,7 +595,7 @@ class ShowerSampler:
         p = np.array([pm[m - 1] for m in avail]); p = p / p.sum()
         m = int(rng.choice(avail, p=p))
         mean, cov = self.interp.mean_cov(pid, E, m, nov)
-        z = rng.multivariate_normal(mean, cov)   # no +-2.5 sigma clip: it cut off late showers
+        z = draw_physical_z(mean, cov, m, rng)
         w, alpha, beta = _from_z(z, m)
         return m, w, alpha, beta
 

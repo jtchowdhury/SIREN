@@ -24,6 +24,8 @@ namespace siren {
 namespace interactions {
 
 namespace {
+    constexpr double EARLY_SIGMA = 2.5;  // reject draws this many sigma too early/narrow
+    constexpr int    MAX_TRIES   = 100;  // then fall back to the mean
     constexpr double COV_RIDGE  = 1e-3;  // PSD floor (hadronic_showers._COV_RIDGE)
     constexpr int    HADRONS_PDG = -2000001006;
     constexpr int    ELECTRON_PDG = 11;
@@ -439,19 +441,37 @@ std::vector<GammaDISFromSpline::Component> GammaDISFromSpline::SampleShower(
     for(auto & e : evals) e = std::max(e, COV_RIDGE);
 
     // ---- z = mean + V sqrt(lambda) g,  g ~ N(0,1) --------------------------
-    // No +-2.5 sigma clip any more (it cut off late-starting showers); matches
-    // hadronic_showers.sample and shower_gamma_model.ShowerSampler.
-    std::vector<double> g(dim), z(dim);
-    for(int a = 0; a < dim; ++a) g[a] = draw_normal(random);
+    // No symmetric +-2.5 sigma clip any more (it cut off late-starting showers).
+    // Redraw unphysical sets instead of clipping (same rule as hadronic_showers.
+    // _draw_physical_z): every component needs alpha > 1 (no spike at the vertex)
+    // and must not be more than EARLY_SIGMA sigma too EARLY or too NARROW in
+    // (log centroid, log width). The late / wide side is unbounded.
+    std::vector<double> sd(dim);
     for(int a = 0; a < dim; ++a) {
-        double v = mean[a];
-        for(int k = 0; k < dim; ++k)
-            v += evecs[a*dim+k] * std::sqrt(evals[k]) * g[k];
-        z[a] = v;
+        double var = 0.0;
+        for(int k = 0; k < dim; ++k) var += evecs[a*dim+k] * evecs[a*dim+k] * evals[k];
+        sd[a] = std::sqrt(std::max(var, 0.0));
     }
-
-    std::vector<double> w, alpha, beta;
-    from_z_(z, m, w, alpha, beta);
+    int shape_lo = (m == 1) ? 0 : (m - 1);               // first log-centroid entry
+    std::vector<double> g(dim), z(dim), w, alpha, beta;
+    bool ok = false;
+    for(int tries = 0; tries < MAX_TRIES && !ok; ++tries) {
+        for(int a = 0; a < dim; ++a) g[a] = draw_normal(random);
+        for(int a = 0; a < dim; ++a) {
+            double v = mean[a];
+            for(int k = 0; k < dim; ++k)
+                v += evecs[a*dim+k] * std::sqrt(evals[k]) * g[k];
+            z[a] = v;
+        }
+        ok = true;
+        for(int a = shape_lo; a < dim && ok; ++a)        // all lc and ls entries
+            if(z[a] < mean[a] - EARLY_SIGMA * sd[a]) ok = false;
+        if(!ok) continue;
+        from_z_(z, m, w, alpha, beta);
+        for(int i = 0; i < m && ok; ++i)
+            if(!(alpha[i] > 1.0)) ok = false;
+    }
+    if(!ok) { z = mean; from_z_(z, m, w, alpha, beta); }  // practically never
 
     // ---- yield N with lognormal fluctuation, scaled ~E out of range --------
     double N = std::exp(interp1d_(s.logE, s.logN.data(), 1, 0, lq));
