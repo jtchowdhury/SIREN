@@ -63,12 +63,15 @@ def e1(samples, truth, var, outdir, nbins):
     for key, s in samples.items():
         wt = np.where(np.isfinite(s["weight"]) & (s["weight"] > 0), s["weight"], 0.0)
         h = np.histogram(vals(s, var), bins, weights=wt)[0]
-        e = np.sqrt(np.histogram(vals(s, var), bins, weights=wt ** 2)[0])
+        e = np.sqrt(np.histogram(vals(s, var), bins, weights=wt ** 2)[0])   # sqrt(sum w^2)
         dens[key] = (h / w, e / w)
         mk, col, lab = STY[key]
-        ax.errorbar(cen, h / w, yerr=e / w, fmt=mk, ms=7, color=col,
+        lo = np.minimum(e / w, 0.95 * h / w)      # keep log-axis error bars above zero
+        ax.errorbar(cen, h / w, yerr=[lo, e / w], fmt=mk, ms=7, color=col,
                     mfc=col if key == "test" else "white", mec=col, mew=1.4,
-                    capsize=2, alpha=0.9, label=f"{lab}   ($\\Sigma w$ = {wt.sum():.3g})")
+                    capsize=2, alpha=0.9,
+                    label=f"{lab}   ($\\Sigma w$ = {wt.sum():.3g} $\\pm$ {np.sqrt((wt**2).sum()):.2g})")
+    curve = None
     if var != "E":
         ref = samples["ref"]
         M = float(np.median(ref["target_mass"]))
@@ -79,14 +82,26 @@ def e1(samples, truth, var, outdir, nbins):
         ax.plot(np.repeat(bins, 2)[1:-1], np.repeat(curve, 2), "-",
                 color=G.COLORS["theory"], lw=2.2,
                 label="Spline, averaged over the weighted spectrum")
-    (dt, et), (dr, er) = dens["test"], dens["ref"]
-    ok = dr > 0
-    axr.errorbar(cen[ok], dt[ok] / dr[ok],
-                 yerr=np.sqrt((et[ok] / dr[ok]) ** 2 + (dt[ok] * er[ok] / dr[ok] ** 2) ** 2),
-                 fmt="o", ms=6, color=G.COLORS["test"], capsize=2)
+    if curve is not None:
+        # ratio of each sample to the smooth spline (the spline is shape-normalised
+        # to the reference total, so the test points also show the Sum-w difference)
+        for key in ("test", "ref"):
+            d, e = dens[key]
+            ok = curve > 0
+            mk, col, _ = STY[key]
+            axr.errorbar(cen[ok], d[ok] / curve[ok], yerr=e[ok] / curve[ok], fmt=mk, ms=6,
+                         color=col, mfc=col if key == "test" else "white", mec=col,
+                         capsize=2, alpha=0.9)
+        axr.set_ylabel("sample / spline", fontsize=13)
+    else:
+        (dt, et), (dr, er) = dens["test"], dens["ref"]
+        ok = dr > 0
+        axr.errorbar(cen[ok], dt[ok] / dr[ok],
+                     yerr=np.sqrt((et[ok] / dr[ok]) ** 2 + (dt[ok] * er[ok] / dr[ok] ** 2) ** 2),
+                     fmt="o", ms=6, color=G.COLORS["test"], capsize=2)
+        axr.set_ylabel("test / reference", fontsize=13)
     axr.axhline(1.0, color=G.COLORS["theory"], lw=1.4)
-    axr.set_ylim(0.6, 1.4)
-    axr.set_ylabel("test / reference", fontsize=13)
+    axr.set_ylim(0.5, 1.5)
     if VARS[var]["log"]:
         ax.set_xscale("log")
     if var != "y":
