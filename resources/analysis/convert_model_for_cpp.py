@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-convert_model_for_cpp.py  --  repack shower_model.npz into a NUMERIC-ONLY npz that
-the C++ GammaDISFromSpline can read with cnpy.
+convert_model_for_cpp.py -- write the shower model as the JSON file that
+GammaDISFromSpline reads (through cereal).
 
-The Python model file stores its index as a JSON string in the __meta__ array (a
-unicode numpy array). cnpy reads numeric arrays, not unicode/JSON, so we drop
-__meta__ and add plain integer index arrays instead:
+Input: shower_model.npz (the Python model) or the older shower_model_cpp.npz.
+Output layout:
 
-    pids           int64 [P]          the species PDG codes present
-    Kmax           int64 [1]
-    <pid>|m_avail  int64 [.]          which m have fitted params, per species
+    {"Kmax": K,
+     "species": [{"pid": 211,
+                  "logE": [L], "pm": [L*K], "logN": [L], "logNsig": [L],
+                  "m": [1, 2],
+                  "mean": [[L*(3m-1)] for each m],
+                  "cov":  [[L*(3m-1)^2] for each m]}, ...]}
 
-Every other array in the original file (<pid>|logE, |z, |pm, |logN, |logNsig,
-|m<m>|mean, |m<m>|cov) is copied through unchanged. The result, shower_model_cpp.npz,
-is what you pass to GammaDISFromSpline's shower_model_path.
+2-d and 3-d arrays are flattened row-major.
 
 Usage:
     python convert_model_for_cpp.py \
         resources/showers/GammaShowerModel-v1.0/shower_model.npz \
-        resources/showers/GammaShowerModel-v1.0/shower_model_cpp.npz
+        resources/showers/GammaShowerModel-v1.0/shower_model.json
 """
 import sys
 import json
@@ -27,34 +27,37 @@ import numpy as np
 
 def main(src, dst):
     d = np.load(src, allow_pickle=False)
-    meta = json.loads(str(d["__meta__"]))
+    if "__meta__" in d.files:                       # Python model file
+        meta = json.loads(str(d["__meta__"]))
+        kmax = int(meta.get("Kmax", 3))
+        m_avail = {int(p): [int(m) for m in sp["m_available"]]
+                   for p, sp in meta["species"].items()}
+    else:                                           # numeric-only npz
+        kmax = int(d["Kmax"][0])
+        m_avail = {int(p): [int(m) for m in d[f"{int(p)}|m_avail"]] for p in d["pids"]}
 
-    out = {}
-    pids = []
-    for pid_str, sp in meta["species"].items():
-        pid = int(pid_str)
-        pids.append(pid)
-        # copy the per-species numeric arrays straight through
-        for suffix in ("logE", "z", "pm", "logN", "logNsig"):
-            out[f"{pid}|{suffix}"] = np.asarray(d[f"{pid}|{suffix}"], dtype=np.float64)
-        m_avail = [int(m) for m in sp["m_available"]]
-        out[f"{pid}|m_avail"] = np.asarray(m_avail, dtype=np.int64)
-        for m in m_avail:
-            out[f"{pid}|m{m}|mean"] = np.asarray(d[f"{pid}|m{m}|mean"], dtype=np.float64)
-            out[f"{pid}|m{m}|cov"] = np.asarray(d[f"{pid}|m{m}|cov"], dtype=np.float64)
+    species = []
+    for pid in sorted(m_avail):
+        def arr(name):
+            a = np.asarray(d[f"{pid}|{name}"], dtype=float).ravel()
+            if not np.all(np.isfinite(a)):
+                raise ValueError(f"{pid}|{name} has non-finite values, which JSON cannot store")
+            return a.tolist()
+        ms = m_avail[pid]
+        species.append({
+            "pid": pid,
+            "logE": arr("logE"), "pm": arr("pm"), "logN": arr("logN"), "logNsig": arr("logNsig"),
+            "m": ms,
+            "mean": [arr(f"m{m}|mean") for m in ms],
+            "cov": [arr(f"m{m}|cov") for m in ms],
+        })
 
-    out["pids"] = np.asarray(sorted(pids), dtype=np.int64)
-    out["Kmax"] = np.asarray([int(meta.get("Kmax", 3))], dtype=np.int64)
-
-    np.savez(dst, **out)
-    print(f"wrote {dst}")
-    print(f"  species (pids): {out['pids'].tolist()}")
-    print(f"  Kmax = {out['Kmax'][0]}")
-    print(f"  arrays: {len(out)}   (dropped __meta__ JSON)")
+    with open(dst, "w") as f:
+        json.dump({"Kmax": kmax, "species": species}, f)
+    print(f"wrote {dst}: Kmax = {kmax}, {len(species)} species")
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        print(__doc__)
-        sys.exit(1)
+        sys.exit(__doc__)
     main(sys.argv[1], sys.argv[2])

@@ -22,7 +22,7 @@ from siren._util import GenerateEvents, SaveEvents
 SIREN_ROOT = os.environ.get("SIREN_ROOT", os.path.expanduser("~/SIREN"))
 # the C++ GammaDISFromSpline reads the NUMERIC-ONLY repack (convert_model_for_cpp.py),
 # not the original shower_model.npz (whose __meta__ is a JSON/unicode array cnpy can't read)
-MODEL_NPZ  = os.path.join(SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/shower_model_cpp.npz")
+MODEL_NPZ  = os.path.join(SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/shower_model.json")
 PYTHIA_NPZ = os.path.join(SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/pythia_events_nue.npz")
 
 N_EVENTS = 100

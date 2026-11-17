@@ -24,7 +24,7 @@ import siren
 from siren._util import GenerateEvents
 
 SIREN_ROOT = os.environ.get("SIREN_ROOT", os.path.expanduser("~/SIREN"))
-MODEL  = os.path.join(SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/shower_model_cpp.npz")
+MODEL  = os.path.join(SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/shower_model.json")
 PYTHIA = os.path.join(SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/pythia_events_nue.npz")
 
 GAMMASUB = -2000002200      # must match ParticleTypes.def

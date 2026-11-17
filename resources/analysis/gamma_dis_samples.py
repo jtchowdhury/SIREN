@@ -30,7 +30,7 @@ from siren._util import GenerateEvents
 
 SIREN_ROOT = os.environ.get("SIREN_ROOT", os.path.expanduser("~/SIREN"))
 SHOWERS = os.path.join(SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0")
-MODEL = os.path.join(SHOWERS, "shower_model_cpp.npz")
+MODEL = os.path.join(SHOWERS, "shower_model.json")
 PYTHIA = os.path.join(SHOWERS, "pythia_events_nue.npz")
 
 PT = siren.dataclasses.Particle.ParticleType
