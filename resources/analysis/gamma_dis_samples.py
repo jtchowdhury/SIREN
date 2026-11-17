@@ -43,7 +43,7 @@ def load_xs(gamma):
     kw = dict(primary_types=[NUE], target_types=[NUCLEON], isoscalar=True,
               process_types=["CC"])
     if gamma:
-        kw.update(shower_model_path=MODEL, pythia_events_path=PYTHIA)
+        kw.update(shower_model_path=MODEL)
     procs, _ = siren.utilities.load_processes("CSMSDISSplines", **kw)
     return procs[NUE]
 

@@ -37,7 +37,6 @@ primary_processes, _ = siren.utilities.load_processes(
     isoscalar=True,
     process_types=["CC"],
     shower_model_path=MODEL_NPZ,      # -> builds GammaDISFromSpline
-    pythia_events_path=PYTHIA_NPZ,
 )
 primary_cross_sections = primary_processes[primary_type]
 

@@ -3,10 +3,8 @@
 gamma_dis_ccnc_samples.py -- GammaDISFromSpline samples for the CC vs NC
 event-shower plots (plot_gamma_dis_ccnc.py).
 
-nu_e on isoscalar nucleons, IceCube, isotropic. Both channels use the SAME (CC)
-PYTHIA library for the hadronic breakdown; NC only differs in that the outgoing
-lepton is the neutrino (kept as a real, unshowered track), so there is no
-electron subshower.
+nu_e on isoscalar nucleons, IceCube, isotropic. In NC the outgoing lepton is the
+neutrino (kept as a real, unshowered track), so there is no electron subshower.
 
   ccnc_mono_E<E>_{cc,nc}.npz   one fixed E_nu each   (spaghetti plot at fixed E_nu)
   ccnc_range_{cc,nc}.npz       E_nu ~ E^-1 over [emin, emax]
@@ -14,7 +12,7 @@ electron subshower.
                                 L2/KS vs E_had)
 
 Stored per event: E_nu, x, y, lepton 4-mom (lep), blob 4-mom (blob = had_*),
-every boosted hadron (had_pid, had_p) and every real subshower (sub_amp,
+every final-state hadron (had_pid, had_p) and every real subshower (sub_amp,
 sub_alpha, sub_beta, sub_parent; parent -1 = the electron, CC only).
 
 Usage (compute node):
@@ -27,7 +25,7 @@ import numpy as np
 import siren
 from siren._util import GenerateEvents
 
-from gamma_dis_samples import MODEL, PYTHIA, NUE, NUCLEON, GAMMASUB, make_injector, four
+from gamma_dis_samples import MODEL, NUE, NUCLEON, GAMMASUB, make_injector, four
 
 ITYPE = {"cc": 1, "nc": 2}   # DISFromSpline interaction_type_
 
@@ -35,7 +33,7 @@ ITYPE = {"cc": 1, "nc": 2}   # DISFromSpline interaction_type_
 def load_xs(channel):
     procs, _ = siren.utilities.load_processes(
         "CSMSDISSplines", primary_types=[NUE], target_types=[NUCLEON], isoscalar=True,
-        process_types=[channel.upper()], shower_model_path=MODEL, pythia_events_path=PYTHIA)
+        process_types=[channel.upper()], shower_model_path=MODEL)
     xs = procs[NUE]
     for x in xs:
         # GammaDIS already detects NC from the file name; set it explicitly anyway

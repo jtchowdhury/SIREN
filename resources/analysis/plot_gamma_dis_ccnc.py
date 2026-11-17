@@ -13,14 +13,17 @@ F2  spaghetti at fixed E_had  (events selected from ccnc_range_{cc,nc}.npz with
     E_had within +-tol of the target). Separates "CC has an electron" from
     "NC has less energy".
 F3  L2 / KS vs E_had (and vs E_nu), one figure per channel.
-    For every SIREN event (= one boosted PYTHIA hadron list + the lepton):
-      * draw --n-g4 (100) G4 event showers: one single-particle G4 shower per
-        hadron (at its kinetic energy), plus one for the electron in CC;
-      * GammaDISFromSpline: the event's output subshowers (all, incl. the
-        electron), compared with each of the 100 G4 showers -> mean L2, mean KS;
-      * Analytic (DISFromSpline): one analytic shower of the hadronic blob only
-        (no electron), compared with each of the same 100 G4 showers;
-      * floor: one extra G4 shower vs the same 100.
+    For every SIREN event, --n-g4 (100) SIMULATED event showers are built. Each one:
+      * hadrons: with --reference library (default), a random full PYTHIA DIS event
+        from the event library with (nearly) this event's E_had, energies scaled to
+        E_had; with --reference same, SIREN's own hadron list for this event;
+      * one stored Geant4 shower per hadron (at its kinetic energy), plus one for
+        the electron in CC, summed.
+    "library" tests hadronization + showers against PYTHIA DIS + Geant4; "same"
+    tests only the showers, for identical hadrons. Compared with each of the 100:
+      * Sampled Gamma Shower: the event's output subshowers (all, incl. the electron);
+      * Fixed Analytical Shower: one analytic shower of the hadronic blob only;
+      * floor: one extra simulated shower.
     The per-event means are then averaged in energy bins. Metric and depth blur
     identical to compare_event_vs_g4.py.
 
@@ -52,9 +55,9 @@ from plot_gamma_dis_showers import binned                       # also puts SIRE
 import hadronic_showers as hs                                   # noqa: E402
 
 COL = {"cc": "#4c78a8", "nc": "#f58518"}
-CURVES = {"gamma":    ("GammaDISFromSpline vs G4", "#F08070", "o", "-"),
-          "analytic": ("Analytic (DISFromSpline blob) vs G4", "#4682B4", "s", "-"),
-          "floor":    ("G4 vs G4 (empirical floor)", "#444444", None, "--")}
+CURVES = {"gamma":    ("Sampled Gamma Shower vs simulation", "#F08070", "o", "-"),
+          "analytic": ("Fixed Analytical Shower vs simulation", "#4682B4", "s", "-"),
+          "floor":    ("simulation vs simulation (floor)", "#444444", None, "--")}
 CURVE_ORDER = ("gamma", "analytic", "floor")    # column order in the rows
 
 # analytic constants (see docstring)
@@ -175,7 +178,45 @@ def g4_composite(EV, lib, parts, x_len, rng):
     return tot
 
 
-def score_channel(EV, lib, model, s, ch, x, sigma, binw, rng, max_events, max_missing, n_g4):
+class PythiaLibrary:
+    """Full PYTHIA DIS events (top-20 hadrons each), sorted in E_had, to draw the
+    hadron list of a simulated event at a given E_had."""
+
+    def __init__(self, path, max_events=300000, seed=0):
+        with np.load(path) as d:
+            Eh, pids, en = d["E_had"], d["top20_pids"], d["top20_energies"]
+        if len(Eh) > max_events:
+            keep = np.random.default_rng(seed).choice(len(Eh), max_events, replace=False)
+            Eh, pids, en = Eh[keep], pids[keep], en[keep]
+        o = np.argsort(Eh)
+        self.logE, self.Eh, self.pids, self.en = np.log(Eh[o]), Eh[o], pids[o], en[o]
+
+    def draw(self, E_had, rng, g4lib, window=50):
+        """[(pid, kinetic energy)] of a library event near E_had, scaled to E_had.
+        K0 -> KS/KL; energy beyond the stored 20 and species without a G4 shower go
+        into one pi0, as in GammaDISFromSpline."""
+        i = int(np.searchsorted(self.logE, np.log(E_had)))
+        lo = max(0, min(i - window // 2, len(self.Eh) - window))
+        k = int(rng.integers(lo, min(lo + window, len(self.Eh))))
+        scale = E_had / self.Eh[k]
+        parts, rest = [], E_had
+        for pid, E in zip(self.pids[k], self.en[k] * scale):
+            pid = int(pid)
+            if pid == 0 or E <= 0:
+                continue
+            if abs(pid) == 311:
+                pid = 310 if rng.random() < 0.5 else 130
+            Ek = G.e_kin(pid, float(E))
+            if pid in g4lib and Ek > 0:
+                parts.append((pid, Ek))
+                rest -= E
+        if rest > 1e-9 * E_had and 111 in g4lib:
+            parts.append((111, G.e_kin(111, rest)))
+        return [(pid, E) for pid, E in parts if E > 0]
+
+
+def score_channel(EV, lib, model, s, ch, x, sigma, binw, rng, max_events, max_missing, n_g4,
+                  pylib=None):
     n_ev = len(s["E_nu"])
     events = pick(rng, np.arange(n_ev), max_events)
     rows, n_skip, missing_pids = [], 0, {}
@@ -190,16 +231,19 @@ def score_channel(EV, lib, model, s, ch, x, sigma, binw, rng, max_events, max_mi
         for pid, E in parts:
             if pid not in lib:
                 missing_pids[pid] = missing_pids.get(pid, 0.0) + E
-        if vis <= 0 or miss / vis > max_missing:
+        if vis <= 0 or (pylib is None and miss / vis > max_missing):
             n_skip += 1
             continue
-        parts = [(pid, E) for pid, E in parts if pid in lib]
-        if ch == "cc":                                   # G4 event = hadrons + electron
-            parts.append((11, G.e_kin(11, float(s["lep"][e, 0]))))
-        g4 = [g4_composite(EV, lib, parts, len(x), rng) for _ in range(n_g4 + 1)]
+        E_had = float(s["blob"][e, 0])
+        lepton = [(11, G.e_kin(11, float(s["lep"][e, 0])))] if ch == "cc" else []
+        if pylib is None:                                # SIREN's own hadrons for this event
+            parts = [(pid, E) for pid, E in parts if pid in lib] + lepton
+            g4 = [g4_composite(EV, lib, parts, len(x), rng) for _ in range(n_g4 + 1)]
+        else:                                            # a new PYTHIA DIS event each time
+            g4 = [g4_composite(EV, lib, pylib.draw(E_had, rng, lib) + lepton, len(x), rng)
+                  for _ in range(n_g4 + 1)]
         ref, extra = g4[:n_g4], g4[n_g4]                 # 100 references + 1 for the floor
 
-        E_had = float(s["blob"][e, 0])
         # the blob contains the struck nucleon's rest mass (baryon number 1), which
         # makes no light -> develop the analytic with the blob's kinetic energy
         E_had_kin = max(E_had - M_NUCLEON, 1e-3)
@@ -216,8 +260,7 @@ def score_channel(EV, lib, model, s, ch, x, sigma, binw, rng, max_events, max_mi
             r += [float(np.nanmean(l2)), float(np.nanmean(ks))]
         rows.append(r)
         print(f"  {ch}: event {j + 1}/{len(events)}", end="\r")
-    print(f"\n  {ch}: scored {len(rows)} events, skipped {n_skip} "
-          f"(> {max_missing:.0%} of the hadronic energy in species without a G4 library)")
+    print(f"\n  {ch}: scored {len(rows)} events, skipped {n_skip}")
     if missing_pids:
         tot = sum(missing_pids.values())
         print("  energy in species with no G4 library: " +
@@ -270,6 +313,11 @@ def main():
     ap.add_argument("--xlim", type=float, nargs=2, default=[0, 1600])
     ap.add_argument("--g4-dir", nargs="+", default=None,
                     help="dir(s) of shower_*_E*GeV.h5, merged (enables F3)")
+    ap.add_argument("--reference", choices=["library", "same"], default="library",
+                    help="hadrons of the simulated showers: PYTHIA DIS library events at the "
+                         "same E_had (default), or SIREN's own hadron list")
+    ap.add_argument("--pythia-lib", default=os.path.join(
+        G.SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/pythia_events_nue.npz"))
     ap.add_argument("--n-g4", type=int, default=100,
                     help="G4 composites per event that each shower is compared with")
     ap.add_argument("--model", default=os.path.join(
@@ -316,6 +364,10 @@ def main():
         print("no --g4-dir: skipping the L2/KS vs G4 figures")
         return
     EV, C, lib = load_g4_tools([os.path.expanduser(d) for d in args.g4_dir])
+    pylib = None
+    if args.reference == "library":
+        pylib = PythiaLibrary(os.path.expanduser(args.pythia_lib))
+        print(f"simulated showers use {len(pylib.Eh)} PYTHIA DIS events from {args.pythia_lib}")
     have = sorted(lib)
     print(f"G4 library species: {have}")
     need = [111, 211, -211, 321, -321, 310, 130, 2212, 2112]
@@ -330,9 +382,9 @@ def main():
     model = hs.load_model(args.model)
     for ch, s in rng_s.items():
         rows = score_channel(EV, lib, model, s, ch, x, sigma, binw, rng,
-                             args.max_events, args.max_missing, args.n_g4)
+                             args.max_events, args.max_missing, args.n_g4, pylib)
         os.makedirs(args.outdir, exist_ok=True)
-        with open(os.path.join(args.outdir, f"ccnc_l2ks_{ch}.csv"), "w", newline="") as fh:
+        with open(os.path.join(args.outdir, f"ccnc_l2ks_{ch}_ref-{args.reference}.csv"), "w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["E_had_GeV", "E_nu_GeV"] +
                        [f"{m}_{k}" for k in CURVE_ORDER for m in ("l2", "ks")])
@@ -343,8 +395,8 @@ def main():
         for col, xl, tag in ((0, r"Hadronic Energy  $E_\mathrm{had}$  [GeV]", "Ehad"),
                              (1, r"Neutrino Energy  $E_\nu$  [GeV]", "Enu")):
             l2ks_plot(binned(rows[:, col], vals),
-                      f"{ch.upper()} Event Showers vs Geant4",
-                      xl, os.path.join(args.outdir, f"ccnc_l2ks_{ch}_vs_{tag}.png"))
+                      f"{ch.upper()} Event Showers vs {'PYTHIA + ' if pylib else ''}Geant4",
+                      xl, os.path.join(args.outdir, f"ccnc_l2ks_{ch}_ref-{args.reference}_vs_{tag}.png"))
 
 
 if __name__ == "__main__":

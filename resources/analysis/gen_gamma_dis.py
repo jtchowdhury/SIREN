@@ -37,7 +37,6 @@ primary_processes, _ = siren.utilities.load_processes(
     isoscalar=True,
     process_types=["CC"],
     shower_model_path=MODEL,
-    pythia_events_path=PYTHIA,
 )
 
 injector = siren.injection.Injector()
