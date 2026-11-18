@@ -269,6 +269,33 @@ def score_channel(EV, lib, model, s, ch, x, sigma, binw, rng, max_events, max_mi
     return np.array(rows, float)
 
 
+def concat_samples(samples):
+    """Join samples written by gamma_dis_ccnc_samples.py (offset arrays are re-based)."""
+    out = {}
+    for k in samples[0]:
+        if np.ndim(samples[0][k]) == 0:
+            continue
+        if k in ("had_off", "sub_off"):
+            parts, shift = [], 0
+            for s in samples:
+                parts.append(s[k][:-1] + shift)
+                shift += s[k][-1]
+            out[k] = np.concatenate(parts + [np.array([shift])])
+        else:
+            out[k] = np.concatenate([s[k] for s in samples])
+    return out
+
+
+def by_energy(E, vals):
+    """Means of each column for every distinct energy (fixed-energy samples)."""
+    keys = np.round(np.log10(E), 3)
+    rows = []
+    for k in np.unique(keys):
+        sel = keys == k
+        rows.append([float(np.median(E[sel]))] + [float(np.nanmean(v[sel])) for v in vals])
+    return np.array(rows)
+
+
 def l2ks_plot(rows, title, xlabel, path, keys=CURVE_ORDER):
     """rows: E, then (l2, ks) for each curve in CURVE_ORDER."""
     if len(rows) == 0:
@@ -313,6 +340,11 @@ def main():
     ap.add_argument("--xlim", type=float, nargs=2, default=[0, 1600])
     ap.add_argument("--g4-dir", nargs="+", default=None,
                     help="dir(s) of shower_*_E*GeV.h5, merged (enables F3)")
+    ap.add_argument("--source", choices=["mono", "range"], default="mono",
+                    help="events for the L2/KS plot: the fixed-E_nu samples (default; plotted "
+                         "vs E_nu only) or the spread-energy samples (also vs E_had, slow to make)")
+    ap.add_argument("--l2ks-energies", type=float, nargs="+", default=list(np.logspace(2, 6, 9)),
+                    help="E_nu of the fixed-E_nu samples used with --source mono")
     ap.add_argument("--reference", choices=["library", "same"], default="library",
                     help="hadrons of the simulated showers: PYTHIA DIS library events at the "
                          "same E_had (default), or SIREN's own hadron list")
@@ -345,8 +377,12 @@ def main():
                   os.path.join(args.outdir, f"ccnc_Enu_{E:.0e}.png"), args.xlim)
 
     # F2: fixed E_had (selected from the range samples)
-    rng_s = {ch: load(f"ccnc_range_{ch}.npz") for ch in ("cc", "nc")}
-    for Et in args.ehad:
+    if args.source == "range":
+        rng_s = {ch: load(f"ccnc_range_{ch}.npz") for ch in ("cc", "nc")}
+    else:
+        rng_s = {ch: concat_samples([load(f"ccnc_mono_E{E:.0e}_{ch}.npz") for E in args.l2ks_energies])
+                 for ch in ("cc", "nc")}
+    for Et in (args.ehad if args.source == "range" else []):
         groups = []
         for ch, s in rng_s.items():
             Eh = s["blob"][:, 0]
@@ -399,9 +435,12 @@ def main():
         if len(rows) == 0:
             continue
         vals = rows[:, 2:].T
-        for col, xl, tag in ((0, r"Hadronic Energy  $E_\mathrm{had}$  [GeV]", "Ehad"),
-                             (1, r"Neutrino Energy  $E_\nu$  [GeV]", "Enu")):
-            l2ks_plot(binned(rows[:, col], vals),
+        axes = [(1, r"Neutrino Energy  $E_\nu$  [GeV]", "Enu")]
+        if args.source == "range":
+            axes.insert(0, (0, r"Hadronic Energy  $E_\mathrm{had}$  [GeV]", "Ehad"))
+        for col, xl, tag in axes:
+            pts = by_energy(rows[:, 1], vals) if args.source == "mono" else binned(rows[:, col], vals)
+            l2ks_plot(pts,
                       f"{ch.upper()} Event Showers vs {'PYTHIA + ' if pylibs[ch] else ''}Geant4",
                       xl, os.path.join(args.outdir, f"ccnc_l2ks_{ch}_ref-{args.reference}_vs_{tag}.png"))
 

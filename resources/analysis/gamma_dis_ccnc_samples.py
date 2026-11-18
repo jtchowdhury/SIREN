@@ -100,9 +100,12 @@ def run(name, channel, edist, n, seed, outdir, detector):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--which", choices=["mono", "range", "all"], default="all")
-    ap.add_argument("--energies", type=float, nargs="+", default=[1e3, 1e4, 1e5],
-                    help="E_nu [GeV] for the fixed-E_nu samples")
+    ap.add_argument("--which", choices=["mono", "range", "all"], default="mono",
+                    help="mono (default) is enough for every plot vs E_nu; range is only "
+                         "needed for the fixed-E_had plots and is slow (Pythia is set up "
+                         "again for every event)")
+    ap.add_argument("--energies", type=float, nargs="+", default=list(np.logspace(2, 6, 9)),
+                    help="E_nu [GeV] for the fixed-E_nu samples (default 100 GeV-1 PeV, half decades)")
     ap.add_argument("--n-mono", type=int, default=300, help="events per fixed-E_nu sample")
     ap.add_argument("--n-range", type=int, default=20000,
                     help="events per range sample (fixed-E_had plots select a window from it)")

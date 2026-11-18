@@ -50,12 +50,16 @@ def legend(ax, loc="best"):
 
 
 def elabel(E):
-    """1e4 -> '10 TeV', 3e2 -> '300 GeV', 1e6 -> '1 PeV'."""
+    """1e4 -> '10 TeV', 3e2 -> '300 GeV', 998941 -> '1 PeV' (3 significant figures,
+    values within 2% of a power of ten are rounded to it)."""
     E = float(E)
+    k = np.round(np.log10(E))
+    if abs(np.log10(E) - k) < 0.01:
+        E = 10.0 ** k
     for unit, scale in (("PeV", 1e6), ("TeV", 1e3), ("GeV", 1.0)):
-        if E >= scale:
-            return f"{E / scale:g} {unit}"
-    return f"{E:g} GeV"
+        if E >= scale * 0.9995:
+            return f"{E / scale:.3g} {unit}"
+    return f"{E:.3g} GeV"
 
 
 def savefig(fig, outdir, name):
