@@ -2,22 +2,25 @@
 """
 plot_gamma_dis_reweighting.py -- section E: are GammaDISFromSpline events reweightable?
 
-Two GammaDIS samples, both weighted to the SAME physical spectrum (E^-2):
-  test       reweight_gamma.npz   generated with E^-1  (the "wrong" spectrum)
-  reference  range_gamma.npz      generated with E^-2  (the right spectrum)
-If reweighting works, the weighted test sample reproduces the reference sample,
-including the absolute normalisation (Sum of weights).
+Two GammaDIS samples, both weighted to the SAME physical spectrum E^-p:
+  test       reweight_gamma<S>.npz   generated with E^-t
+  reference  range_gamma<S>.npz      generated with E^-p
+(p, t and the suffix S are set in gamma_dis_samples.py; the indices are read from
+the files.) If reweighting works, the weighted test sample reproduces the
+reference sample, including the absolute normalisation (Sum of weights).
 
   E1  weighted <dsigma/dx>, <dsigma/dy>, <dsigma/dQ^2> and dN/dE_nu:
-      test (points), reference (points), spline averaged over the reference's
-      weighted energy spectrum (line), ratio panel test/reference
+      test and reference (points); standalone Pythia DIS averaged over the
+      reference's weighted energy spectrum (solid line; GammaDIS takes x and y from
+      Pythia) and the CSMS spline (dashed, for comparison); ratio panel to Pythia.
+      For E_nu the ratio panel is test/reference.
   E2  dsigma/dxdy from the GammaDIS override (what the Weighter uses) vs plain
       DISFromSpline at the same (E, x, y, Q^2): must lie on the diagonal
   E3  distribution of log10(weight) for test and reference (no NaN / zero weights)
 
 Usage:
     python plot_gamma_dis_reweighting.py --samples output/gamma_dis_samples \
-        --outdir output/gamma_dis_plots/reweighting
+        --outdir output/gamma_dis_plots/reweighting [--suffix _rev]
 """
 import os
 import argparse
@@ -27,6 +30,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import gamma_dis_common as G
+import pythia_dis_reference as PR
+
+SPLINE_STYLE = dict(color="#888888", lw=1.8, ls="--")
 
 VARS = {
     "x":  dict(label=r"$x$", dens=r"$\langle d\sigma/dx\rangle_\Phi$  [arb. units]", log=True),
@@ -36,8 +42,14 @@ VARS = {
     "E":  dict(label=r"Neutrino Energy  $E_\nu$  [GeV]",
                dens=r"weighted rate  $dN/dE_\nu$  [arb. units]", log=True),
 }
-STY = {"test": ("o", G.COLORS["test"], "Test: generated $E^{-1}$, reweighted to $E^{-2}$"),
-       "ref":  ("s", G.COLORS["ref"],  "Reference: generated $E^{-2}$")}
+STY = {"test": ("o", G.COLORS["test"], "Test"), "ref": ("s", G.COLORS["ref"], "Reference")}
+
+
+def set_labels(samples):
+    p = float(samples["ref"]["phys_index"]) if "phys_index" in samples["ref"] else 2.0
+    t = float(samples["test"]["gen_index"]) if "gen_index" in samples["test"] else 1.0
+    STY["test"] = ("o", G.COLORS["test"], f"Test: generated $E^{{-{t:g}}}$, reweighted to $E^{{-{p:g}}}$")
+    STY["ref"] = ("s", G.COLORS["ref"], f"Reference: generated $E^{{-{p:g}}}$")
 
 
 def vals(s, v):
@@ -53,7 +65,7 @@ def make_bins(arrs, v, n):
         else np.linspace(lo, hi, n + 1)
 
 
-def e1(samples, truth, var, outdir, nbins):
+def e1(samples, truth, spline, var, outdir, nbins, suffix=""):
     bins = make_bins([vals(s, var) for s in samples.values()], var, nbins)
     w = np.diff(bins)
     cen = np.sqrt(bins[1:] * bins[:-1]) if VARS[var]["log"] else 0.5 * (bins[1:] + bins[:-1])
@@ -81,10 +93,12 @@ def e1(samples, truth, var, outdir, nbins):
         curve = p * wref.sum() / w
         ax.plot(np.repeat(bins, 2)[1:-1], np.repeat(curve, 2), "-",
                 color=G.COLORS["theory"], lw=2.2,
-                label="Spline, averaged over the weighted spectrum")
+                label=truth.label + ", averaged over the weighted spectrum")
+        cs = spline.expected_1d(var, bins, comps, M) * wref.sum() / w
+        ax.plot(np.repeat(bins, 2)[1:-1], np.repeat(cs, 2), label=G.LABELS["theory"], **SPLINE_STYLE)
     if curve is not None:
-        # ratio of each sample to the smooth spline (the spline is shape-normalised
-        # to the reference total, so the test points also show the Sum-w difference)
+        # ratio of each sample to the Pythia reference (normalised to the reference
+        # total, so the test points also show the Sum-w difference)
         for key in ("test", "ref"):
             d, e = dens[key]
             ok = curve > 0
@@ -92,7 +106,10 @@ def e1(samples, truth, var, outdir, nbins):
             axr.errorbar(cen[ok], d[ok] / curve[ok], yerr=e[ok] / curve[ok], fmt=mk, ms=6,
                          color=col, mfc=col if key == "test" else "white", mec=col,
                          capsize=2, alpha=0.9)
-        axr.set_ylabel("sample / spline", fontsize=13)
+        okc = curve > 0
+        axr.plot(np.repeat(bins, 2)[1:-1],
+                 np.repeat(np.where(okc, cs / np.where(okc, curve, 1), np.nan), 2), **SPLINE_STYLE)
+        axr.set_ylabel("sample / Pythia", fontsize=13)
     else:
         (dt, et), (dr, er) = dens["test"], dens["ref"]
         ok = dr > 0
@@ -112,7 +129,7 @@ def e1(samples, truth, var, outdir, nbins):
     G.title(ax, f"Reweighting Closure: {name}")
     G.legend(ax)
     G.style(ax); G.style(axr)
-    G.savefig(fig, outdir, f"reweight_{var}.png")
+    G.savefig(fig, outdir, f"reweight_{var}{suffix}.png")
     plt.close(fig)
 
 
@@ -144,7 +161,7 @@ def e2(samples, outdir):
     plt.close(fig)
 
 
-def e3(samples, outdir):
+def e3(samples, outdir, suffix=""):
     fig, ax = plt.subplots(figsize=(8.2, 6.2))
     for key, s in samples.items():
         wt = s["weight"]
@@ -156,7 +173,7 @@ def e3(samples, outdir):
     ax.set_ylabel("events", fontsize=14)
     G.title(ax, "Event Weight Distribution")
     G.legend(ax); G.style(ax)
-    G.savefig(fig, outdir, "reweight_weights.png")
+    G.savefig(fig, outdir, f"reweight_weights{suffix}.png")
     plt.close(fig)
 
 
@@ -167,19 +184,26 @@ def main():
     ap.add_argument("--outdir", default="output/gamma_dis_plots/reweighting")
     ap.add_argument("--nbins", type=int, default=30)
     ap.add_argument("--cache", default=None)
+    ap.add_argument("--suffix", default="", help="as given to gamma_dis_samples.py")
+    ap.add_argument("--pythia-n", type=int, default=20000, help="Pythia reference events per energy")
+    ap.add_argument("--pdf-set", default=PR.PDF_SET, help="as in GammaDIS; '' for Pythia's built-in PDF")
+    ap.add_argument("--q2min", type=float, default=1.0, help="minimum Q^2 of the spline [GeV^2]")
     args = ap.parse_args()
-    samples = {"test": G.load_sample(os.path.join(args.samples, "reweight_gamma.npz")),
-               "ref": G.load_sample(os.path.join(args.samples, "range_gamma.npz"))}
+    samples = {"test": G.load_sample(os.path.join(args.samples, f"reweight_gamma{args.suffix}.npz")),
+               "ref": G.load_sample(os.path.join(args.samples, f"range_gamma{args.suffix}.npz"))}
+    set_labels(samples)
     for k, s in samples.items():
         bad = ~(np.isfinite(s["weight"]) & (s["weight"] > 0))
         if bad.any():
             print(f"WARNING: {k}: {bad.sum()} events with NaN/zero weight "
                   "(counted as weight 0 in E1, listed in E3)")
-    truth = G.SplineTruth(cache=args.cache or os.path.join(args.samples, "theory_cache.npz"))
+    spline = G.SplineTruth(cache=args.cache or os.path.join(args.samples, "theory_cache.npz"))
+    truth = PR.PythiaTruth(cache=os.path.join(args.samples, "pythia_reference_cc.npz"),
+                           n=args.pythia_n, cc=True, pdf_set=args.pdf_set, q2min=args.q2min)
     for var in VARS:
-        e1(samples, truth, var, args.outdir, args.nbins)
+        e1(samples, truth, spline, var, args.outdir, args.nbins, args.suffix)
     e2(samples, args.outdir)
-    e3(samples, args.outdir)
+    e3(samples, args.outdir, args.suffix)
 
 
 if __name__ == "__main__":

@@ -3,17 +3,22 @@
 plot_gamma_dis_kinematics.py -- section A: are the sampled DIS kinematics right?
 
 For every monochromatic energy and for the energy range, compares
-GammaDISFromSpline events, DISFromSpline events, and the CSMS spline itself.
+GammaDISFromSpline events and DISFromSpline events with two references:
+  * standalone Pythia DIS with GammaDIS's settings (pythia_dis_reference.py):
+    GammaDIS takes x and y from Pythia, so this is the pass/fail reference
+    (solid line, ratio panel, pulls);
+  * the CSMS spline (dashed): what DISFromSpline samples from, shown to see how
+    far Pythia's DIS is from it.
 
   A1-A3  (1/sigma) dsigma/dx vs x, dsigma/dy vs y, dsigma/dQ^2 vs Q^2
          (events as points with Poisson errors, spline as a line, ratio panel)
   A4-A6  2D maps in (x, y), (x, Q^2), (y, Q^2):
          rows = GammaDIS, DISFromSpline; columns = events, spline, pull
-  A7-A8  <y> and <Q^2> vs E_nu from the range samples, with the spline curve
+  A7-A8  <y> and <Q^2> vs E_nu from the range samples, with both references
 
-For the range samples the spline "truth" is the average of the normalised
-dsigma/dx dy over the energies that were actually generated (unweighted events
-follow the generation spectrum).
+For the range samples the references are averaged over the energies that were
+actually generated (unweighted events follow the generation spectrum).
+LHAPDF_DATA_PATH must point to the PDF set for the Pythia reference.
 
 Usage:
     python plot_gamma_dis_kinematics.py --samples output/gamma_dis_samples \
@@ -29,6 +34,9 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
 import gamma_dis_common as G
+import pythia_dis_reference as PR
+
+SPLINE_STYLE = dict(color="#888888", lw=1.8, ls="--")
 
 VARS = {
     "x":  dict(label=r"$x$", dens=r"$(1/\sigma)\,d\sigma/dx$", log=True, ylog=True),
@@ -51,8 +59,8 @@ def make_bins(arrs, var, n):
     return np.linspace(max(lo, 0.0), min(hi, 1.0), n + 1)
 
 
-def marginal(samples, truth, comps, M, var, tag, ftag, outdir, nbins):
-    """samples: {'gamma': s, 'dis': s}; one figure with a ratio panel."""
+def marginal(samples, truth, spline, comps, M, var, tag, ftag, outdir, nbins):
+    """samples: {'gamma': s, 'dis': s}; one figure with a ratio panel against truth."""
     bins = make_bins([values(s, var) for s in samples.values()], var, nbins)
     w = np.diff(bins)
     centers = np.sqrt(bins[1:] * bins[:-1]) if VARS[var]["log"] else 0.5 * (bins[1:] + bins[:-1])
@@ -63,7 +71,12 @@ def marginal(samples, truth, comps, M, var, tag, ftag, outdir, nbins):
                                   gridspec_kw=dict(height_ratios=[3, 1]))
     fine = np.repeat(bins, 2)[1:-1]
     ax.plot(fine, np.repeat(dens_exp, 2), "-", color=G.COLORS["theory"], lw=2.2,
-            label=G.LABELS["theory"])
+            label=truth.label)
+    dens_spl = spline.expected_1d(var, bins, comps, M) / w
+    ax.plot(fine, np.repeat(dens_spl, 2), label=G.LABELS["theory"], **SPLINE_STYLE)
+    ok = dens_exp > 0
+    axr.plot(fine, np.repeat(np.where(ok, dens_spl / np.where(ok, dens_exp, 1), np.nan), 2),
+             **SPLINE_STYLE)
     for key, marker in (("gamma", "o"), ("dis", "s")):
         if key not in samples:
             continue
@@ -86,7 +99,7 @@ def marginal(samples, truth, comps, M, var, tag, ftag, outdir, nbins):
     if VARS[var]["ylog"]:
         ax.set_yscale("log")
     ax.set_ylabel(VARS[var]["dens"], fontsize=14)
-    axr.set_ylabel("events / spline", fontsize=13)
+    axr.set_ylabel("ratio to Pythia", fontsize=13)
     axr.set_xlabel(VARS[var]["label"], fontsize=15)
     var_txt = {"x": "x", "y": "y", "Q2": r"$Q^2$"}[var]
     G.title(ax, f"Differential Cross Section vs {var_txt}  ({tag})")
@@ -114,8 +127,8 @@ def plane(samples, truth, comps, M, va, vb, tag, ftag, outdir, nbins):
         pull = np.where(mu > 0, (n - mu) / np.sqrt(np.where(mu > 0, mu, 1)), np.nan)
         pull[(mu < 1) & (n == 0)] = np.nan          # empty, expected-empty bins
         panels = [(n / (N * area), "events", "viridis", norm),
-                  (dens_exp, "spline", "viridis", norm),
-                  (pull, "pull  (events - spline)/$\\sqrt{\\mathrm{spline}}$", "RdBu_r", None)]
+                  (dens_exp, "reference", "viridis", norm),
+                  (pull, "pull  (events - ref.)/$\\sqrt{\\mathrm{ref.}}$", "RdBu_r", None)]
         for c, (Z, what, cmap, nrm) in enumerate(panels):
             ax = axes[r, c]
             Zm = np.ma.masked_where(~np.isfinite(Z) | ((Z <= 0) & (nrm is not None)), Z)
@@ -133,7 +146,7 @@ def plane(samples, truth, comps, M, va, vb, tag, ftag, outdir, nbins):
                 ax.set_yscale("log")
             ax.set_xlabel(VARS[va]["label"], fontsize=15)
             ax.set_ylabel(VARS[vb]["label"], fontsize=15)
-            G.title(ax, G.LABELS["theory"] if c == 1 else f"{G.LABELS[key]}: {what.split('  ')[0]}")
+            G.title(ax, truth.label if c == 1 else f"{G.LABELS[key]}: {what.split('  ')[0]}")
             ax.tick_params(labelsize=12)
             if c == 2:
                 ok = np.isfinite(pull)
@@ -147,15 +160,16 @@ def plane(samples, truth, comps, M, va, vb, tag, ftag, outdir, nbins):
     plt.close(fig)
 
 
-def means_vs_energy(samples, truth, M, outdir, nbins=10):
+def means_vs_energy(samples, truth, spline, M, outdir, nbins=10):
     fig, (a1, a2) = plt.subplots(2, 1, figsize=(8.2, 9.4), sharex=True)
     Eall = np.concatenate([s["E_nu"] for s in samples.values()])
     edges = np.logspace(np.log10(Eall.min()), np.log10(Eall.max()), nbins + 1)
     Egrid = np.logspace(np.log10(edges[0]), np.log10(edges[-1]), 14)
-    a1.plot(Egrid, [truth.mean("y", E, M) for E in Egrid], "-",
-            color=G.COLORS["theory"], lw=2.2, label=G.LABELS["theory"])
-    a2.plot(Egrid, [truth.mean("Q2", E, M) for E in Egrid], "-",
-            color=G.COLORS["theory"], lw=2.2, label=G.LABELS["theory"])
+    for ax, var in ((a1, "y"), (a2, "Q2")):
+        ax.plot(Egrid, [truth.mean(var, E, M) for E in Egrid], "-",
+                color=G.COLORS["theory"], lw=2.2, label=truth.label)
+        ax.plot(Egrid, [spline.mean(var, E, M) for E in Egrid], label=G.LABELS["theory"],
+                **SPLINE_STYLE)
     for key, marker in (("gamma", "o"), ("dis", "s")):
         if key not in samples:
             continue
@@ -193,8 +207,13 @@ def main():
     ap.add_argument("--nbins", type=int, default=40)
     ap.add_argument("--nbins2d", type=int, default=30)
     ap.add_argument("--cache", default=None, help="spline grid cache (default: <samples>/theory_cache.npz)")
+    ap.add_argument("--pythia-n", type=int, default=20000, help="Pythia reference events per energy")
+    ap.add_argument("--pdf-set", default=PR.PDF_SET, help="as in GammaDIS; '' for Pythia's built-in PDF")
+    ap.add_argument("--q2min", type=float, default=1.0, help="minimum Q^2 of the spline [GeV^2]")
     args = ap.parse_args()
-    truth = G.SplineTruth(cache=args.cache or os.path.join(args.samples, "theory_cache.npz"))
+    spline = G.SplineTruth(cache=args.cache or os.path.join(args.samples, "theory_cache.npz"))
+    truth = PR.PythiaTruth(cache=os.path.join(args.samples, "pythia_reference_cc.npz"),
+                           n=args.pythia_n, cc=True, pdf_set=args.pdf_set, q2min=args.q2min)
 
     # monochromatic
     for gpath in sorted(glob.glob(os.path.join(args.samples, "mono_E*_gamma.npz"))):
@@ -208,7 +227,7 @@ def main():
         tag, ftag = rf"$E_\nu$ = {G.elabel(E)}", f"E{E:.0e}"
         print(f"\n== monochromatic {tag} ==")
         for var in VARS:
-            marginal(samples, truth, [(E, 1.0)], M, var, tag, ftag, args.outdir, args.nbins)
+            marginal(samples, truth, spline, [(E, 1.0)], M, var, tag, ftag, args.outdir, args.nbins)
         for va, vb in PLANES:
             plane(samples, truth, [(E, 1.0)], M, va, vb, tag, ftag, args.outdir, args.nbins2d)
 
@@ -225,10 +244,10 @@ def main():
         tag, ftag = rf"$E_\nu$ = {G.elabel(Eg.min())}–{G.elabel(Eg.max())}", "range"
         print(f"\n== range {tag} ({len(comps)} energy slices) ==")
         for var in VARS:
-            marginal(samples, truth, comps, M, var, tag, ftag, args.outdir, args.nbins)
+            marginal(samples, truth, spline, comps, M, var, tag, ftag, args.outdir, args.nbins)
         for va, vb in PLANES:
             plane(samples, truth, comps, M, va, vb, tag, ftag, args.outdir, args.nbins2d)
-        means_vs_energy(samples, truth, M, args.outdir)
+        means_vs_energy(samples, truth, spline, M, args.outdir)
 
 
 if __name__ == "__main__":

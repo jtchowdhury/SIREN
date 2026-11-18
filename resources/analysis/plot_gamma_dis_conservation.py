@@ -2,8 +2,11 @@
 """
 plot_gamma_dis_conservation.py -- section B: is 4-momentum conserved per event?
 
-  B1  total event:  | p_nu + p_target - (Sum p_hadrons + p_lepton) | / E_nu   vs E_nu
-  B2  diagnostic:   | Sum p_hadrons - p_blob | / E_had                       vs E_had
+  B1  total event:  | p_nu + p_target - (Sum p_hadrons + p_invisible + p_lepton) | / E_nu   vs E_nu
+  B2  diagnostic:   | Sum p_hadrons + p_invisible - p_had | / E_had                     vs E_had
+
+p_target uses the mass of the nucleon Pythia actually used (target_pdg); p_invisible is
+the sum of the decay neutrinos, which are not in the hadron list.
 
 One marker colour per component (E, px, py, pz). Values at exact zero are drawn
 at the floor 1e-17 so they stay on the log axis. Uses every *_gamma.npz sample.
@@ -25,6 +28,7 @@ import gamma_dis_common as G
 COMP = [("E", "#222222", "o"), (r"p_x", "#F08070", "s"),
         (r"p_y", "#4682B4", "^"), (r"p_z", "#9B4DCA", "D")]
 FLOOR = 1e-17
+NUCLEON_MASS = {2212: 0.93827208816, 2112: 0.93956542052}
 
 
 def hadron_sums(s):
@@ -62,7 +66,13 @@ def main():
     for f in files:
         s = G.load_sample(f)
         H = hadron_sums(s)
-        p_target = np.zeros_like(s["p_nu"]); p_target[:, 0] = s["target_mass"]
+        if "invisible" in s:
+            H = H + s["invisible"]
+        mass = s["target_mass"].copy()
+        if "target_pdg" in s:
+            for pdg, m in NUCLEON_MASS.items():
+                mass[s["target_pdg"] == pdg] = m
+        p_target = np.zeros_like(s["p_nu"]); p_target[:, 0] = mass
         r1 = s["p_nu"] + p_target - (H + s["lep"])
         R1.append(np.abs(r1) / s["E_nu"][:, None]); E_nu.append(s["E_nu"])
         r2 = H - s["blob"]
@@ -73,14 +83,14 @@ def main():
 
     fig, ax = plt.subplots(figsize=(8.2, 6.2))
     draw(ax, E_nu, R1, r"Neutrino Energy  $E_\nu$  [GeV]",
-         r"$|p_\nu + p_\mathrm{target} - (\sum p_\mathrm{had} + p_\ell)|\,/\,E_\nu$",
+         r"$|p_\nu + p_\mathrm{target} - (\sum p_\mathrm{had} + p_\mathrm{inv} + p_\ell)|\,/\,E_\nu$",
          "Event 4-Momentum Conservation")
     G.savefig(fig, args.outdir, "conservation_total_vs_Enu.png"); plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8.2, 6.2))
     draw(ax, E_had, R2, r"Hadronic Energy  $E_\mathrm{had}$  [GeV]",
-         r"$|\sum p_\mathrm{had} - p_\mathrm{blob}|\,/\,E_\mathrm{had}$",
-         "Hadron Breakdown vs Hadronic System")
+         r"$|\sum p_\mathrm{had} + p_\mathrm{inv} - p_\mathrm{X}|\,/\,E_\mathrm{had}$",
+         "Hadron List vs Hadronic System")
     G.savefig(fig, args.outdir, "conservation_hadrons_vs_Ehad.png"); plt.close(fig)
 
 

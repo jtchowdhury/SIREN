@@ -6,13 +6,16 @@ validation plots and save one compact .npz per sample in --outdir.
 All samples: CC nu_e on isoscalar nucleons, IceCube, isotropic directions.
 
   mono_E<E>_gamma.npz / mono_E<E>_dis.npz   one fixed E_nu, GammaDIS / DISFromSpline
-  range_gamma.npz     / range_dis.npz       generated ~E^-2, weighted to E^-2
-  reweight_gamma.npz                        generated ~E^-1, weighted to E^-2
+  range_gamma<S>.npz  / range_dis<S>.npz    generated ~E^-p, weighted to E^-p
+  reweight_gamma<S>.npz                     generated ~E^-t, weighted to E^-p
                                             (the "test" for the reweighting check;
-                                             range_gamma.npz is its "reference")
+                                             range_gamma<S>.npz is its "reference")
+with p = --phys-index (default 2), t = --test-index (default 1), S = --suffix.
+For the reverse check: --phys-index 1 --test-index 2 --suffix _rev.
 
 Stored per event: E_nu, p_nu, target_mass, bjorken x, y, weight (NaN if none).
-GammaDIS samples additionally store the lepton and blob 4-momenta, every boosted
+GammaDIS samples additionally store the target nucleon (target_pdg), the lepton,
+hadronic-system and invisible (decay neutrino) 4-momenta, every
 hadron (pid + 4-momentum), every real subshower (amplitude, alpha, beta,
 parent index), and the cross section from the GammaDIS override and from plain
 DISFromSpline at the same kinematics (reweighting check E2).
@@ -31,7 +34,6 @@ from siren._util import GenerateEvents
 SIREN_ROOT = os.environ.get("SIREN_ROOT", os.path.expanduser("~/SIREN"))
 SHOWERS = os.path.join(SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0")
 MODEL = os.path.join(SHOWERS, "shower_model.json")
-PYTHIA = os.path.join(SHOWERS, "pythia_events_nue.npz")
 
 PT = siren.dataclasses.Particle.ParticleType
 NUE, NUCLEON = PT.NuE, PT.Nucleon
@@ -64,14 +66,14 @@ def make_injector(xs, edist, n, detector, seed):
     return inj
 
 
-def make_weighter(inj, xs, detector, emin, emax):
+def make_weighter(inj, xs, detector, emin, emax, index=2):
     w = siren.injection.Weighter()
     w.injectors = [inj]
     w.detector_model = detector
     w.primary_type = NUE
     w.primary_interactions = xs
     w.primary_physical_distributions = [
-        siren.distributions.PowerLaw(2, emin, emax),
+        siren.distributions.PowerLaw(index, emin, emax),
         siren.distributions.IsotropicDirection(),
     ]
     return w
@@ -84,7 +86,7 @@ def four(ip, prefix):
 def extract(events, gamma, weighter=None, gamma_xs=None, dis_ref=None):
     c = {k: [] for k in ("E_nu", "p_nu", "target_mass", "x", "y", "weight")}
     if gamma:
-        for k in ("lep", "blob", "had_n", "had_pid", "had_p", "sub_n", "sub_amp",
+        for k in ("lep", "blob", "invisible", "target_pdg", "had_n", "had_pid", "had_p", "sub_n", "sub_amp",
                   "sub_alpha", "sub_beta", "sub_parent", "xs_override", "xs_base"):
             c[k] = []
     for ev in events:
@@ -103,6 +105,8 @@ def extract(events, gamma, weighter=None, gamma_xs=None, dis_ref=None):
         lep = np.array(four(ip, "lep"))
         c["lep"].append(lep)
         c["blob"].append(four(ip, "had"))
+        c["invisible"].append(four(ip, "invisible") if "invisible_E" in ip else [0.0] * 4)
+        c["target_pdg"].append(ip.get("target_pdg", 0.0))
         n = 0
         while f"hadron{n}_E" in ip:
             c["had_pid"].append(int(ip[f"hadron{n}_pid"]))
@@ -140,13 +144,14 @@ def extract(events, gamma, weighter=None, gamma_xs=None, dis_ref=None):
 
 
 def run(name, gamma, edist, n, seed, outdir, detector, weight_range=None,
-        dis_ref=None):
+        dis_ref=None, gen_index=np.nan, phys_index=np.nan):
     xs = load_xs(gamma)
     inj = make_injector(xs, edist, n, detector, seed)
     print(f"\n== {name}: {n} events ({'GammaDIS' if gamma else 'DISFromSpline'}) ==")
     events, _ = GenerateEvents(inj)
-    weighter = make_weighter(inj, xs, detector, *weight_range) if weight_range else None
+    weighter = make_weighter(inj, xs, detector, *weight_range, index=phys_index) if weight_range else None
     d = extract(events, gamma, weighter, xs[0] if gamma else None, dis_ref)
+    d["gen_index"], d["phys_index"] = np.array(gen_index), np.array(phys_index)
     path = os.path.join(outdir, name + ".npz")
     np.savez(path, **d)
     print(f"wrote {path}")
@@ -162,6 +167,11 @@ def main():
     ap.add_argument("--emin", type=float, default=1e3)
     ap.add_argument("--emax", type=float, default=1e6)
     ap.add_argument("--outdir", default="output/gamma_dis_samples")
+    ap.add_argument("--phys-index", type=float, default=2.0,
+                    help="spectral index the range/reweight samples are weighted to")
+    ap.add_argument("--test-index", type=float, default=1.0,
+                    help="spectral index the reweight (test) sample is generated with")
+    ap.add_argument("--suffix", default="", help="appended to the range/reweight file names")
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -180,14 +190,16 @@ def main():
     if args.which in ("range", "all"):
         for gamma in (True, False):
             seed += 1
-            run(f"range_{'gamma' if gamma else 'dis'}", gamma,
-                siren.distributions.PowerLaw(2, args.emin, args.emax), args.n, seed,
-                args.outdir, detector, weight_range=wr, dis_ref=dis_ref)
+            run(f"range_{'gamma' if gamma else 'dis'}{args.suffix}", gamma,
+                siren.distributions.PowerLaw(args.phys_index, args.emin, args.emax), args.n, seed,
+                args.outdir, detector, weight_range=wr, dis_ref=dis_ref,
+                gen_index=args.phys_index, phys_index=args.phys_index)
     if args.which in ("reweight", "all"):
         seed += 1
-        run("reweight_gamma", True,
-            siren.distributions.PowerLaw(1, args.emin, args.emax), args.n, seed,
-            args.outdir, detector, weight_range=wr, dis_ref=dis_ref)
+        run(f"reweight_gamma{args.suffix}", True,
+            siren.distributions.PowerLaw(args.test_index, args.emin, args.emax), args.n, seed,
+            args.outdir, detector, weight_range=wr, dis_ref=dis_ref,
+            gen_index=args.test_index, phys_index=args.phys_index)
 
 
 if __name__ == "__main__":

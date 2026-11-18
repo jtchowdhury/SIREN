@@ -316,8 +316,10 @@ def main():
     ap.add_argument("--reference", choices=["library", "same"], default="library",
                     help="hadrons of the simulated showers: PYTHIA DIS library events at the "
                          "same E_had (default), or SIREN's own hadron list")
-    ap.add_argument("--pythia-lib", default=os.path.join(
-        G.SIREN_ROOT, "resources/showers/GammaShowerModel-v1.0/pythia_events_nue.npz"))
+    ap.add_argument("--pythia-lib-cc", default="output/pythia_events_cc.npz",
+                    help="CC event library from pythia_dis_reference.py library --channel cc")
+    ap.add_argument("--pythia-lib-nc", default="output/pythia_events_nc.npz",
+                    help="NC event library from pythia_dis_reference.py library --channel nc")
     ap.add_argument("--n-g4", type=int, default=100,
                     help="G4 composites per event that each shower is compared with")
     ap.add_argument("--model", default=os.path.join(
@@ -364,10 +366,15 @@ def main():
         print("no --g4-dir: skipping the L2/KS vs G4 figures")
         return
     EV, C, lib = load_g4_tools([os.path.expanduser(d) for d in args.g4_dir])
-    pylib = None
+    pylibs = {"cc": None, "nc": None}
     if args.reference == "library":
-        pylib = PythiaLibrary(os.path.expanduser(args.pythia_lib))
-        print(f"simulated showers use {len(pylib.Eh)} PYTHIA DIS events from {args.pythia_lib}")
+        for ch in ("cc", "nc"):
+            path = os.path.expanduser(getattr(args, f"pythia_lib_{ch}"))
+            if not os.path.exists(path):
+                raise SystemExit(f"{path} not found: run pythia_dis_reference.py library --channel {ch} "
+                                 f"--out {path}")
+            pylibs[ch] = PythiaLibrary(path)
+            print(f"{ch.upper()}: simulated showers use {len(pylibs[ch].Eh)} PYTHIA DIS events from {path}")
     have = sorted(lib)
     print(f"G4 library species: {have}")
     need = [111, 211, -211, 321, -321, 310, 130, 2212, 2112]
@@ -382,7 +389,7 @@ def main():
     model = hs.load_model(args.model)
     for ch, s in rng_s.items():
         rows = score_channel(EV, lib, model, s, ch, x, sigma, binw, rng,
-                             args.max_events, args.max_missing, args.n_g4, pylib)
+                             args.max_events, args.max_missing, args.n_g4, pylibs[ch])
         os.makedirs(args.outdir, exist_ok=True)
         with open(os.path.join(args.outdir, f"ccnc_l2ks_{ch}_ref-{args.reference}.csv"), "w", newline="") as fh:
             w = csv.writer(fh)
@@ -395,7 +402,7 @@ def main():
         for col, xl, tag in ((0, r"Hadronic Energy  $E_\mathrm{had}$  [GeV]", "Ehad"),
                              (1, r"Neutrino Energy  $E_\nu$  [GeV]", "Enu")):
             l2ks_plot(binned(rows[:, col], vals),
-                      f"{ch.upper()} Event Showers vs {'PYTHIA + ' if pylib else ''}Geant4",
+                      f"{ch.upper()} Event Showers vs {'PYTHIA + ' if pylibs[ch] else ''}Geant4",
                       xl, os.path.join(args.outdir, f"ccnc_l2ks_{ch}_ref-{args.reference}_vs_{tag}.png"))
 
 
