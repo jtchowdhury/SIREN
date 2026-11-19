@@ -86,7 +86,8 @@ def four(ip, prefix):
 def extract(events, gamma, weighter=None, gamma_xs=None, dis_ref=None):
     c = {k: [] for k in ("E_nu", "p_nu", "target_mass", "x", "y", "weight")}
     if gamma:
-        for k in ("lep", "blob", "invisible", "target_pdg", "had_n", "had_pid", "had_p", "sub_n", "sub_amp",
+        for k in ("lep", "blob", "invisible", "muon", "target_pdg", "had_n", "had_pid", "had_p", "had_ekin",
+                  "sub_n", "sub_amp",
                   "sub_alpha", "sub_beta", "sub_parent", "xs_override", "xs_base"):
             c[k] = []
     for ev in events:
@@ -106,11 +107,13 @@ def extract(events, gamma, weighter=None, gamma_xs=None, dis_ref=None):
         c["lep"].append(lep)
         c["blob"].append(four(ip, "had"))
         c["invisible"].append(four(ip, "invisible") if "invisible_E" in ip else [0.0] * 4)
+        c["muon"].append(four(ip, "muon") if "muon_E" in ip else [0.0] * 4)
         c["target_pdg"].append(ip.get("target_pdg", 0.0))
         n = 0
         while f"hadron{n}_E" in ip:
             c["had_pid"].append(int(ip[f"hadron{n}_pid"]))
             c["had_p"].append(four(ip, f"hadron{n}"))
+            c["had_ekin"].append(ip[f"hadron{n}_Ekin"])
             n += 1
         c["had_n"].append(n)
 

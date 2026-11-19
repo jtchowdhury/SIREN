@@ -131,11 +131,11 @@ def main():
         comp_out = np.zeros_like(z)
         comp_draws = np.zeros((nd + 1, len(z)))
         for p in np.unique(parents):
+            # model is labelled by kinetic energy (as the C++ uses)
             if p >= 0:
-                pid, E = int(s["had_pid"][h0 + p]), float(s["had_p"][h0 + p, 0])
+                pid, E = int(s["had_pid"][h0 + p]), G.hadron_ekin(s, h0 + p)
             else:
-                pid, E = 11, float(s["lep"][e, 0])
-            E = G.e_kin(pid, E)          # model is labelled by kinetic energy (as the C++ uses)
+                pid, E = 11, G.e_kin(11, float(s["lep"][e, 0]))
             if not model.has(pid) or E <= 0:
                 continue
             sel = np.arange(a, b)[parents == p]

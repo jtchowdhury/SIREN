@@ -2,11 +2,11 @@
 """
 plot_gamma_dis_conservation.py -- section B: is 4-momentum conserved per event?
 
-  B1  total event:  | p_nu + p_target - (Sum p_hadrons + p_invisible + p_lepton) | / E_nu   vs E_nu
-  B2  diagnostic:   | Sum p_hadrons + p_invisible - p_had | / E_had                     vs E_had
+  B1  total event:  | p_nu + p_target - (Sum p_hadrons + p_invisible + p_muon + p_lepton) | / E_nu   vs E_nu
+  B2  diagnostic:   | Sum p_hadrons + p_invisible + p_muon - p_had | / E_had                     vs E_had
 
-p_target uses the mass of the nucleon Pythia actually used (target_pdg); p_invisible is
-the sum of the decay neutrinos, which are not in the hadron list.
+p_target uses the mass of the nucleon Pythia actually used (target_pdg); p_invisible and
+p_muon are the sums of the decay neutrinos and decay muons, which are not in the hadron list.
 
 One marker colour per component (E, px, py, pz). Values at exact zero are drawn
 at the floor 1e-17 so they stay on the log axis. Uses every *_gamma.npz sample.
@@ -68,6 +68,8 @@ def main():
         H = hadron_sums(s)
         if "invisible" in s:
             H = H + s["invisible"]
+        if "muon" in s:
+            H = H + s["muon"]
         mass = s["target_mass"].copy()
         if "target_pdg" in s:
             for pdg, m in NUCLEON_MASS.items():
@@ -83,13 +85,13 @@ def main():
 
     fig, ax = plt.subplots(figsize=(8.2, 6.2))
     draw(ax, E_nu, R1, r"Neutrino Energy  $E_\nu$  [GeV]",
-         r"$|p_\nu + p_\mathrm{target} - (\sum p_\mathrm{had} + p_\mathrm{inv} + p_\ell)|\,/\,E_\nu$",
+         r"$|p_\nu + p_\mathrm{target} - (\sum p_\mathrm{had} + p_\mathrm{inv} + p_\mu + p_\ell)|\,/\,E_\nu$",
          "Event 4-Momentum Conservation")
     G.savefig(fig, args.outdir, "conservation_total_vs_Enu.png"); plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8.2, 6.2))
     draw(ax, E_had, R2, r"Hadronic Energy  $E_\mathrm{had}$  [GeV]",
-         r"$|\sum p_\mathrm{had} + p_\mathrm{inv} - p_\mathrm{X}|\,/\,E_\mathrm{had}$",
+         r"$|\sum p_\mathrm{had} + p_\mathrm{inv} + p_\mu - p_\mathrm{X}|\,/\,E_\mathrm{had}$",
          "Hadron List vs Hadronic System")
     G.savefig(fig, args.outdir, "conservation_hadrons_vs_Ehad.png"); plt.close(fig)
 

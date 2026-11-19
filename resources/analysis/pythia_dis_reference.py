@@ -57,8 +57,11 @@ def make_pythia(E_nu, beam, target, cc, pdf_set=PDF_SET, q2min=1.0, seed=1):
 
 
 def events(E_nu, n, beam=12, cc=True, pdf_set=PDF_SET, q2min=1.0, seed=1):
-    """Yield (lepton 4-momentum, [(pid, E, px, py, pz)] of the hadronic system) for
-    n events, protons and neutrons in the ratio 10:8."""
+    """Yield (lepton 4-momentum, [(pid, E, px, py, pz, E_kin)] of the hadrons,
+    4-momentum of the rest of the hadronic system) for n events, protons and
+    neutrons in the ratio 10:8. Same selection as GammaDISFromSpline: the lepton is
+    the hard-process one followed to its final copy, decay neutrinos and muons are
+    not in the hadron list but are in the rest."""
     lep_id = beam - 1 if (cc and beam > 0) else (beam + 1 if cc else beam)
     n_p = int(round(n * 10 / 18))
     for target, nt in ((2212, n_p), (2112, n - n_p)):
@@ -70,17 +73,26 @@ def events(E_nu, n, beam=12, cc=True, pdf_set=PDF_SET, q2min=1.0, seed=1):
             if not py.next():
                 continue
             ev = py.event
-            i_lep, best = -1, -1.0
+            i_lep = -1
             for i in range(ev.size()):
-                if ev[i].isFinal() and ev[i].id() == lep_id and ev[i].e() > best:
-                    i_lep, best = i, ev[i].e()
+                if ev[i].statusAbs() == 23 and ev[i].id() == lep_id:
+                    j = ev[i].iBotCopyId()
+                    if ev[j].isFinal():
+                        i_lep = j
+                    break
             if i_lep < 0:
                 continue
-            had = [(ev[i].id(), ev[i].e(), ev[i].px(), ev[i].py(), ev[i].pz())
-                   for i in range(ev.size())
-                   if ev[i].isFinal() and i != i_lep and abs(ev[i].id()) not in NEUTRINOS]
+            had, rest = [], np.zeros(4)
+            for i in range(ev.size()):
+                if not ev[i].isFinal() or i == i_lep:
+                    continue
+                p = ev[i]
+                if abs(p.id()) in NEUTRINOS or abs(p.id()) == 13:
+                    rest += [p.e(), p.px(), p.py(), p.pz()]
+                    continue
+                had.append((p.id(), p.e(), p.px(), p.py(), p.pz(), max(p.e() - p.m(), 0.0)))
             l = ev[i_lep]
-            yield np.array([l.e(), l.px(), l.py(), l.pz()]), had
+            yield np.array([l.e(), l.px(), l.py(), l.pz()]), had, rest
             done += 1
 
 
@@ -114,7 +126,7 @@ class PythiaTruth:
         if key not in self._ev:
             print(f"  Pythia reference: {self.n} events at E_nu = {key:g} GeV")
             Q2, y = [], []
-            for lep, _ in events(key, self.n, self.beam, self.cc, self.pdf_set, self.q2min, self.seed):
+            for lep, _, _ in events(key, self.n, self.beam, self.cc, self.pdf_set, self.q2min, self.seed):
                 q2, yy = lepton_kinematics(key, lep)
                 Q2.append(q2); y.append(yy)
             self._ev[key] = (np.array(Q2), np.array(y))
@@ -157,20 +169,25 @@ class PythiaTruth:
 
 
 def write_library(path, cc, beam, energies, n, pdf_set, q2min, seed):
-    rec = {k: [] for k in ("E_nu", "E_had", "top20_pids", "top20_energies",
-                           "top20_momenta", "p_had", "p_lepton")}
+    # hadrons sorted by kinetic energy, as in GammaDISFromSpline; rest_ekin is the
+    # kinetic energy of the hadrons beyond the stored 20
+    rec = {k: [] for k in ("E_nu", "E_had", "top20_pids", "top20_energies", "top20_ekin",
+                           "top20_momenta", "rest_ekin", "p_had", "p_lepton")}
     for E in energies:
         print(f"  {n} {'CC' if cc else 'NC'} events at E_nu = {E:g} GeV")
-        for lep, had in events(E, n, beam, cc, pdf_set, q2min, seed):
-            had.sort(key=lambda h: -h[1])
+        for lep, had, rest in events(E, n, beam, cc, pdf_set, q2min, seed):
+            had.sort(key=lambda h: -h[5])
             top = had[:20]
             pad = 20 - len(top)
+            p_had = (np.sum([h[1:5] for h in had], axis=0) if had else np.zeros(4)) + rest
             rec["E_nu"].append(E)
-            rec["E_had"].append(sum(h[1] for h in had))
+            rec["E_had"].append(p_had[0])
             rec["top20_pids"].append([h[0] for h in top] + [0] * pad)
             rec["top20_energies"].append([h[1] for h in top] + [0.0] * pad)
-            rec["top20_momenta"].append([list(h[1:]) for h in top] + [[0.0] * 4] * pad)
-            rec["p_had"].append(np.sum([h[1:] for h in had], axis=0) if had else np.zeros(4))
+            rec["top20_ekin"].append([h[5] for h in top] + [0.0] * pad)
+            rec["top20_momenta"].append([list(h[1:5]) for h in top] + [[0.0] * 4] * pad)
+            rec["rest_ekin"].append(sum(h[5] for h in had[20:]))
+            rec["p_had"].append(p_had)
             rec["p_lepton"].append(lep)
     out = {k: np.array(v, dtype=np.int64 if k == "top20_pids" else float) for k, v in rec.items()}
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

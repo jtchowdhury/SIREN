@@ -28,8 +28,7 @@ COL = {"cc": "#4c78a8", "nc": "#f58518"}
 
 def event_draw(model, s, e, ch, x, rng):
     h0, h1 = s["had_off"][e], s["had_off"][e + 1]
-    parts = [(int(s["had_pid"][i]), G.e_kin(s["had_pid"][i], float(s["had_p"][i, 0])))
-             for i in range(h0, h1)]
+    parts = [(int(s["had_pid"][i]), G.hadron_ekin(s, i)) for i in range(h0, h1)]
     if ch == "cc":
         parts.append((11, G.e_kin(11, float(s["lep"][e, 0]))))
     y = np.zeros_like(x)

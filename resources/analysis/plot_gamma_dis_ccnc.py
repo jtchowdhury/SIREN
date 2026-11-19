@@ -184,35 +184,39 @@ class PythiaLibrary:
 
     def __init__(self, path, max_events=300000, seed=0):
         with np.load(path) as d:
-            Eh, pids, en = d["E_had"], d["top20_pids"], d["top20_energies"]
+            if "top20_ekin" not in d.files:
+                raise SystemExit(f"{path} was written before kinetic energies were stored: "
+                                 "regenerate it with pythia_dis_reference.py library")
+            Eh, pids, ek, rest = d["E_had"], d["top20_pids"], d["top20_ekin"], d["rest_ekin"]
         if len(Eh) > max_events:
             keep = np.random.default_rng(seed).choice(len(Eh), max_events, replace=False)
-            Eh, pids, en = Eh[keep], pids[keep], en[keep]
+            Eh, pids, ek, rest = Eh[keep], pids[keep], ek[keep], rest[keep]
         o = np.argsort(Eh)
-        self.logE, self.Eh, self.pids, self.en = np.log(Eh[o]), Eh[o], pids[o], en[o]
+        self.logE, self.Eh, self.pids = np.log(Eh[o]), Eh[o], pids[o]
+        self.ek, self.rest = ek[o], rest[o]
 
     def draw(self, E_had, rng, g4lib, window=50):
         """[(pid, kinetic energy)] of a library event near E_had, scaled to E_had.
-        K0 -> KS/KL; energy beyond the stored 20 and species without a G4 shower go
-        into one pi0, as in GammaDISFromSpline."""
+        K0 -> KS/KL; the kinetic energy of the hadrons beyond the stored 20 and of
+        species without a G4 shower goes into one pi0, as in GammaDISFromSpline."""
         i = int(np.searchsorted(self.logE, np.log(E_had)))
         lo = max(0, min(i - window // 2, len(self.Eh) - window))
         k = int(rng.integers(lo, min(lo + window, len(self.Eh))))
         scale = E_had / self.Eh[k]
-        parts, rest = [], E_had
-        for pid, E in zip(self.pids[k], self.en[k] * scale):
-            pid = int(pid)
-            if pid == 0 or E <= 0:
+        parts, rest = [], float(self.rest[k]) * scale
+        for pid, Ek in zip(self.pids[k], self.ek[k] * scale):
+            pid, Ek = int(pid), float(Ek)
+            if pid == 0 or Ek <= 0:
                 continue
             if abs(pid) == 311:
                 pid = 310 if rng.random() < 0.5 else 130
-            Ek = G.e_kin(pid, float(E))
-            if pid in g4lib and Ek > 0:
+            if pid in g4lib:
                 parts.append((pid, Ek))
-                rest -= E
+            else:
+                rest += Ek
         if rest > 1e-9 * E_had and 111 in g4lib:
-            parts.append((111, G.e_kin(111, rest)))
-        return [(pid, E) for pid, E in parts if E > 0]
+            parts.append((111, rest))
+        return parts
 
 
 def score_channel(EV, lib, model, s, ch, x, sigma, binw, rng, max_events, max_missing, n_g4,
@@ -223,8 +227,7 @@ def score_channel(EV, lib, model, s, ch, x, sigma, binw, rng, max_events, max_mi
     for j, e in enumerate(events):
         h0, h1 = s["had_off"][e], s["had_off"][e + 1]
         # hadrons at kinetic energy (the G4 library / model are labelled by E_kin)
-        parts = [(int(s["had_pid"][i]), G.e_kin(s["had_pid"][i], float(s["had_p"][i, 0])))
-                 for i in range(h0, h1)]
+        parts = [(int(s["had_pid"][i]), G.hadron_ekin(s, i)) for i in range(h0, h1)]
         parts = [(pid, E) for pid, E in parts if E > 0]
         vis = sum(E for _, E in parts)
         miss = sum(E for pid, E in parts if pid not in lib)

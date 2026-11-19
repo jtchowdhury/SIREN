@@ -5,8 +5,8 @@ test_gamma_dis_conservation.py -- quick runtime check of GammaDISFromSpline.
 Injects a few CC or NC nu_e events and checks, on the live interaction records:
 
   1. it runs and produces GammaSubshower secondaries;
-  2. the hadron list plus the invisible decay neutrinos add up to the hadronic
-     system: Sum hadron<i> + invisible == had_*;
+  2. the hadron list plus the decay neutrinos and muons add up to the hadronic
+     system: Sum hadron<i> + invisible + muon == had_*;
   3. the event conserves 4-momentum: lep_* + had_* == p_nu + p_target, with the
      mass of the nucleon Pythia actually used (target_pdg).
 
@@ -74,8 +74,8 @@ def main():
         n_sub += len(subs)
         nhad = int(ip.get("had_count", 0))
         hsum = sum((four(ip, f"hadron{i}") for i in range(nhad)), np.zeros(4))
-        had, lep, inv = four(ip, "had"), four(ip, "lep"), four(ip, "invisible")
-        res_had = np.abs(hsum + inv - had).max()
+        had, lep, inv, mu = four(ip, "had"), four(ip, "lep"), four(ip, "invisible"), four(ip, "muon")
+        res_had = np.abs(hsum + inv + mu - had).max()
         m_t = NUCLEON_MASS.get(int(ip.get("target_pdg", 0)), rec.target_mass)
         p_in = np.array(rec.primary_momentum, float) + np.array([m_t, 0.0, 0.0, 0.0])
         res_tot = np.abs(lep + had - p_in).max()
@@ -83,10 +83,11 @@ def main():
         if ie < 5:
             print(f"ev {ie}: E_nu {rec.primary_momentum[0]:9.1f}  x {ip.get('bjorken_x', 0):.3g}  "
                   f"y {ip.get('bjorken_y', 0):.3f}  hadrons {nhad:2d}  subshowers {len(subs):2d}  "
-                  f"invisible {inv[0]:.3g} GeV  residuals {res_had:.1e} / {res_tot:.1e}")
+                  f"invisible {inv[0]:.3g} GeV  muons {mu[0]:.3g} GeV  "
+                  f"residuals {res_had:.1e} / {res_tot:.1e}")
 
     print(f"\nsubshowers produced                : {n_sub}")
-    print(f"worst |Sum hadrons + invisible - had| : {worst_had:.2e} GeV")
+    print(f"worst |Sum hadrons + invisible + muon - had| : {worst_had:.2e} GeV")
     print(f"worst |lep + had - (nu + target)|     : {worst_tot:.2e} GeV")
     if n_sub == 0:
         print("PROBLEM: no GammaSubshower secondaries")

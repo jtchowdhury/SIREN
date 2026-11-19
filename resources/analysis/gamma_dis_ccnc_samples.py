@@ -45,8 +45,8 @@ def load_xs(channel):
 
 
 def extract(events, channel):
-    c = {k: [] for k in ("E_nu", "x", "y", "lep", "blob", "had_n", "had_pid", "had_p",
-                         "sub_n", "sub_amp", "sub_alpha", "sub_beta", "sub_parent")}
+    c = {k: [] for k in ("E_nu", "x", "y", "lep", "blob", "muon", "had_n", "had_pid", "had_p",
+                         "had_ekin", "sub_n", "sub_amp", "sub_alpha", "sub_beta", "sub_parent")}
     for i, ev in enumerate(events):
         rec = next(iter(ev.tree)).record
         ip = dict(rec.interaction_parameters)
@@ -60,10 +60,12 @@ def extract(events, channel):
         c["y"].append(ip.get("bjorken_y", np.nan))
         c["lep"].append(four(ip, "lep"))
         c["blob"].append(four(ip, "had"))
+        c["muon"].append(four(ip, "muon"))
         n = 0
         while f"hadron{n}_E" in ip:
             c["had_pid"].append(int(ip[f"hadron{n}_pid"]))
             c["had_p"].append(four(ip, f"hadron{n}"))
+            c["had_ekin"].append(ip[f"hadron{n}_Ekin"])
             n += 1
         c["had_n"].append(n)
         k = 0
